@@ -107,7 +107,7 @@ class GmailInbox {
     if (allCodes && allCodes.length > 0) {
       const validCodes = allCodes.filter(code => {
         const n = parseInt(code);
-        if (n >= 200000 && n <= 203000) return false; // 排除年份
+        if (n >= 202000 && n <= 203000) return false; // 排除年份 (2020-2030)
         if (/^(\d)\1{5}$/.test(code)) return false;   // 排除全相同
         return true;
       });

@@ -4,3 +4,4 @@ register_results.json
 error_*.png
 config.local.js
 .env
+progress.json

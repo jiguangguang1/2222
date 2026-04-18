@@ -326,13 +326,18 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
 
     await inputVerificationCode(page, code);
 
-    // 等待页面跳转（登录成功）
+    // 点击提交验证码后的下一步按钮
+    await delay(1000);
+    await clickNextButton(page);
     await delay(2000);
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
     await delay(2000);
 
-    log(`✅ 登录成功: ${finalEmail}`, 'success');
-    return { success: true, email: finalEmail, url: page.url() };
+    // 设置密码 + 同意条款 + 设置昵称
+    const nickname = await completeRegistration(page, finalEmail, null);
+
+    log(`✅ 注册成功: ${finalEmail}`, 'success');
+    return { success: true, email: finalEmail, password: config.password, nickname, url: page.url() };
 
   } catch (error) {
     log(`注册失败: ${finalEmail} - ${error.message}`, 'error');
@@ -547,8 +552,8 @@ async function main() {
   fs.writeFileSync('register_results.json', JSON.stringify(report, null, 2));
   log('结果已保存到 register_results.json', 'success');
 
-  if ((mode === '1' || mode === '3') && results.success.length > 0) {
-    const accounts = results.success.map(r => `${r.email}|${r.password}|${r.nickname}`).join('\n');
+  if (results.success.length > 0) {
+    const accounts = results.success.map(r => `${r.email}|${r.password || config.password}|${r.nickname || ''}`).join('\n');
     fs.writeFileSync('accounts.txt', accounts + '\n');
     log('账号信息已保存到 accounts.txt', 'success');
   }
