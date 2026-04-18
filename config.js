@@ -1,5 +1,3 @@
-const path = require('path');
-
 // 默认配置
 const defaults = {
   password: "TestPass123!",

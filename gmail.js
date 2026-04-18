@@ -9,7 +9,7 @@ const { simpleParser } = require('mailparser');
 class GmailInbox {
   constructor(user, appPassword) {
     if (!user || !appPassword) {
-      throw new Error('Gmail 配置缺失：请在 config.js 或环境变量中设置 gmail.user 和 gmail.appPassword');
+      throw new Error('Gmail 配置缺失：请在 config.local.js 中设置 gmail.user 和 gmail.appPassword');
     }
     this.user = user;
     this.appPassword = appPassword.replace(/\s/g, ''); // 去除空格
@@ -89,11 +89,15 @@ class GmailInbox {
 
     console.log(`⏳ 等待 Gmail 验证码邮件... (超时: ${timeout / 1000}s)`);
 
-    // 先记录已有的邮件 UID，避免拿到旧邮件
+    // 先记录最新 100 封邮件的 UID 作为基准，避免拿到旧邮件
+    // （扫描全量邮箱太慢，只看最近的就够了）
     try {
       const lock = await this.client.getMailboxLock('INBOX');
       try {
-        for await (const message of this.client.fetch('1:*', { uid: true })) {
+        const status = await this.client.status('INBOX', { messages: true });
+        const total = status.messages || 0;
+        const startSeq = Math.max(1, total - 99);
+        for await (const message of this.client.fetch(`${startSeq}:*`, { uid: true })) {
           seenUids.add(message.uid);
         }
       } finally {
