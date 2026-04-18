@@ -168,19 +168,41 @@ async function completeRegistration(page, email, nickname) {
 // ========================
 
 async function inputEmailAndSendCode(page, email) {
+  // 等待邮箱输入框出现
   const emailInput = await page.waitForSelector(
-    'input[type="email"], input[id*="email"], input[autoComplete="email"]',
+    'input[type="email"], input[id*="email"], input[autoComplete="email"], input[name*="email"]',
     { timeout: config.pageTimeout }
   );
   await emailInput.click({ clickCount: 3 });
   await emailInput.type(email, { delay: 50 });
   log(`已输入邮箱: ${email}`, 'info');
 
-  await delay(500);
-  const submitBtn = await page.waitForSelector('button[type="submit"]', { timeout: 10000 });
-  await submitBtn.click();
-  log('已发送验证码', 'info');
+  // 点击输入框外部，触发可能的 change/blur 事件
+  await page.click('body');
+  await delay(1000);
 
+  // 多种方式尝试点击发送按钮
+  let clicked = false;
+
+  // 方式1: 直接 JS 点击 submit 按钮
+  try {
+    await page.evaluate(() => {
+      const btn = document.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = false; btn.click(); }
+    });
+    clicked = true;
+    log('通过 JS 点击了 submit 按钮', 'info');
+  } catch {}
+
+  if (!clicked) {
+    // 方式2: 用 clickNextButton
+    await clickNextButton(page);
+  }
+
+  log('已发送验证码', 'info');
+  await delay(2000);
+
+  // 等待页面跳转（不强制要求成功）
   await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
   await delay(2000);
 }
