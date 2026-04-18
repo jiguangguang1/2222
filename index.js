@@ -403,19 +403,52 @@ async function inputEmailAndSendCode(page, email) {
   // 点击按钮
   await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
   await delay(300);
+
+  const urlBefore = page.url();
   await sendBtn.click();
   log('已点击发送验证码按钮', 'success');
 
-  // 等待页面响应
+  // 等待页面变化（SPA 可能不会触发 navigation 事件）
   await delay(3000);
-  try {
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-    log('页面已跳转', 'info');
-  } catch {
-    log('无页面跳转（同页 AJAX）', 'debug');
+
+  // 检测 URL 变化
+  const urlAfter = page.url();
+  if (urlBefore !== urlAfter) log(`URL变化: ${urlAfter}`, 'info');
+
+  // 等待验证码输入框出现（说明页面已切换到验证码步骤）
+  const codeSelectors = [
+    'input[type="tel"]', 'input[type="number"]', 'input[inputmode="numeric"]',
+    'input[maxlength="1"]', 'input[maxlength="6"]', 'input[maxlength="4"]',
+    'input[id*="code" i]', 'input[name*="code" i]',
+    'input[placeholder*="验证码" i]', 'input[placeholder*="code" i]',
+  ];
+
+  let codeInputFound = false;
+  for (const sel of codeSelectors) {
+    try {
+      await page.waitForSelector(sel, { timeout: 5000, visible: true });
+      log(`检测到验证码输入框: ${sel}`, 'success');
+      codeInputFound = true;
+      break;
+    } catch {}
   }
 
-  await delay(2000);
+  // 备选：等待传统导航
+  if (!codeInputFound) {
+    try {
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 });
+      log('页面已跳转', 'info');
+    } catch {}
+  }
+
+  // 检查按钮是否还在（可能点击没生效）
+  if (!codeInputFound) {
+    const btnStill = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
+    }).catch(() => false);
+    if (btnStill) log('警告: 发送按钮仍然存在，可能未生效', 'warn');
+  }
+
   await debugScreenshot(page, 'after_send_code');
 }
 
