@@ -118,19 +118,14 @@ async function clickNextButton(page) {
     } catch {}
   }
 
-  // JS 强制点击 submit
+  // Puppeteer 真实点击 submit
   try {
-    const clicked = await page.evaluate(() => {
-      const btn = document.querySelector('button[type="submit"]');
-      if (btn) {
-        btn.disabled = false;
-        btn.click();
-        return true;
-      }
-      return false;
-    });
-    if (clicked) {
-      log('通过 JS 点击了 submit 按钮', 'info');
+    const submitBtn = await page.$('button[type="submit"]');
+    if (submitBtn) {
+      await submitBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
+      await new Promise(r => setTimeout(r, 300));
+      await submitBtn.click();
+      log('通过 Puppeteer 点击了 submit 按钮', 'info');
       return true;
     }
   } catch {}
@@ -230,13 +225,17 @@ async function inputEmailAndSendCode(page, email) {
   await page.click('body');
   await delay(1000);
 
-  // JS 强制点击
+  // Puppeteer 真实点击
   try {
-    await page.evaluate(() => {
-      const btn = document.querySelector('button[type="submit"]');
-      if (btn) { btn.disabled = false; btn.click(); }
-    });
-    log('通过 JS 点击了 submit 按钮', 'info');
+    const submitBtn = await page.$('button[type="submit"]');
+    if (submitBtn) {
+      await submitBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
+      await new Promise(r => setTimeout(r, 300));
+      await submitBtn.click();
+      log('已点击 submit 按钮', 'info');
+    } else {
+      await clickNextButton(page);
+    }
   } catch {
     await clickNextButton(page);
   }
@@ -453,6 +452,7 @@ async function main() {
   log('启动浏览器...', 'wait');
   const browser = await puppeteer.launch({
     headless: config.headless,
+    executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -548,3 +548,4 @@ main().catch(err => {
   log(`程序异常: ${err.message}`, 'error');
   process.exit(1);
 });
+
