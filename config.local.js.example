@@ -1,0 +1,20 @@
+// config.local.js — 本地配置模板
+// 复制此文件为 config.local.js 并填入你的真实信息
+// 此文件不会提交到 git
+
+module.exports = {
+  // 注册密码（8+位，需包含英文、数字、特殊符号中至少两种）
+  password: "YourPass123!",
+
+  // Gmail 配置（模式3使用）
+  gmail: {
+    user: "yourname@gmail.com",
+    appPassword: "abcd efgh ijkl mnop", // 16位应用专用密码
+  },
+
+  // 可选覆盖项（不填则用默认值）
+  // delay: 5000,
+  // headless: false,
+  // defaultReferralCode: "",
+  // nicknamePrefix: "user",
+};

@@ -27,6 +27,9 @@ function generateNickname(prefix) {
 
 function generateGmailAlias(baseEmail) {
   // Gmail + 别名: user+random@gmail.com
+  if (!baseEmail || !baseEmail.includes('@')) {
+    throw new Error('config.gmail.user 未配置或格式错误');
+  }
   const [localPart, domain] = baseEmail.split('@');
   const rand = Math.random().toString(36).substring(2, 8) + Date.now().toString(36).slice(-4);
   return `${localPart}+nol_${rand}@${domain}`;
@@ -377,10 +380,9 @@ async function main() {
   } else if (mode === '3') {
     // 检查 Gmail 配置
     if (!config.gmail.user || !config.gmail.appPassword) {
-      log('Gmail 配置缺失！请在 config.js 或环境变量中设置:', 'error');
-      log('  gmail.user: 你的 Gmail 地址', 'error');
-      log('  gmail.appPassword: Gmail 应用专用密码', 'error');
-      log('获取方式: https://myaccount.google.com/apppasswords', 'info');
+      log('Gmail 配置缺失！请创建 config.local.js 并添加:', 'error');
+      log('  module.exports = { gmail: { user: "xxx@gmail.com", appPassword: "xxxx xxxx xxxx xxxx" } };', 'error');
+      log('应用专用密码获取: https://myaccount.google.com/apppasswords', 'info');
       process.exit(1);
     }
     count = parseInt(await askInput('请输入要注册的数量: '), 10);

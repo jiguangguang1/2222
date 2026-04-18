@@ -25,16 +25,21 @@ npm install
 2. 选择「邮件」+「其他（自定义名称）」
 3. 生成16位密码，填入 config.js
 
-### 2. 编辑 config.js
+### 2. 创建 config.local.js
 
+```bash
+# 复制模板并编辑
+cp config.local.js.example config.local.js
+```
+
+填入你的信息：
 ```js
 module.exports = {
   password: "YourPass123!",
   gmail: {
-    user: "yourname@gmail.com",         // 你的 Gmail 地址
-    appPassword: "abcd efgh ijkl mnop", // 应用专用密码
+    user: "yourname@gmail.com",
+    appPassword: "abcd efgh ijkl mnop",
   },
-  // ... 其他配置
 };
 ```
 

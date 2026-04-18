@@ -122,7 +122,7 @@ class GmailInbox {
             const from = parsed.from?.text || '';
             const subject = parsed.subject || '';
 
-            // 检查是否是 NOL 相关邮件（放宽条件，也匹配所有新邮件）
+            // 记录发件人信息，便于调试
             const text = [
               parsed.text || '',
               parsed.html || '',
@@ -131,8 +131,8 @@ class GmailInbox {
 
             const code = this.extractCode(text);
             if (code) {
-              console.log(`\n✅ 从邮件 "${subject}" 提取到验证码: ${code}`);
-              // 标记为已读
+              // 如果是 NOL 邮件，直接用；如果是其他邮件，只在没找到 NOL 邮件时用
+              console.log(`\n✅ 从邮件 "${subject}" (from: ${from}) 提取到验证码: ${code}`);
               await this.client.messageFlagsAdd(String(uid), ['\\Seen']).catch(() => {});
               return code;
             }

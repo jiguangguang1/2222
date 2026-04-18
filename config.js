@@ -1,14 +1,12 @@
-module.exports = {
-  // ============== 注册密码 ==============
+const path = require('path');
+
+// 默认配置
+const defaults = {
   password: "TestPass123!",
-
-  // ============== Gmail 配置 ==============
   gmail: {
-    user: process.env.GMAIL_USER || "",
-    appPassword: process.env.GMAIL_APP_PASSWORD || "",
+    user: "",
+    appPassword: "",
   },
-
-  // ============== 通用配置 ==============
   delay: 5000,
   maxConcurrentRequests: 1,
   verificationTimeout: 300000,
@@ -18,3 +16,17 @@ module.exports = {
   nicknamePrefix: "user",
   baseUrl: "https://world.nol.com/zh-CN/auth-web/email-registration",
 };
+
+// 尝试加载本地配置（不进 git）
+let local = {};
+try {
+  local = require('./config.local');
+} catch {}
+
+// 合并：本地配置覆盖默认值
+const config = { ...defaults, ...local };
+if (local.gmail) {
+  config.gmail = { ...defaults.gmail, ...local.gmail };
+}
+
+module.exports = config;
