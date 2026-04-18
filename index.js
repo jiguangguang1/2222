@@ -26,8 +26,8 @@ function randomUA() {
 // ========================
 
 function log(msg, type = 'info') {
-  const icons = { info: 'ℹ️', success: '✅', error: '❌', warn: '⚠️', wait: '⏳', retry: '🔄' };
-  const colors = { info: '\x1b[36m', success: '\x1b[32m', error: '\x1b[31m', warn: '\x1b[33m', wait: '\x1b[35m', retry: '\x1b[33m' };
+  const icons = { info: 'ℹ️', success: '✅', error: '❌', warn: '⚠️', wait: '⏳', retry: '🔄', debug: '🔍' };
+  const colors = { info: '\x1b[36m', success: '\x1b[32m', error: '\x1b[31m', warn: '\x1b[33m', wait: '\x1b[35m', retry: '\x1b[33m', debug: '\x1b[90m' };
   const reset = '\x1b[0m';
   console.log(`${colors[type] || ''}${icons[type] || ''} ${msg}${reset}`);
 }
@@ -36,7 +36,6 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 随机延迟（在 base 基础上 ±30%）
 function randomDelay(base) {
   const variance = base * 0.3;
   return Math.round(base + (Math.random() * 2 - 1) * variance);
@@ -75,6 +74,43 @@ function formatTime(seconds) {
   return `${m}m${s}s`;
 }
 
+// 调试截图
+async function debugScreenshot(page, label) {
+  const path = `debug_${label}_${Date.now()}.png`;
+  await page.screenshot({ path, fullPage: true }).catch(() => {});
+  log(`调试截图: ${path}`, 'debug');
+  return path;
+}
+
+// 打印当前页面信息（调试用）
+async function debugPageInfo(page) {
+  try {
+    const info = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button')).map(b => ({
+        text: b.textContent.trim().substring(0, 50),
+        type: b.type,
+        disabled: b.disabled,
+        className: b.className.substring(0, 80),
+      }));
+      const inputs = Array.from(document.querySelectorAll('input')).map(i => ({
+        type: i.type,
+        id: i.id,
+        name: i.name,
+        placeholder: i.placeholder,
+      }));
+      return { url: location.href, title: document.title, buttons, inputs };
+    });
+    log(`页面: ${info.url}`, 'debug');
+    log(`标题: ${info.title}`, 'debug');
+    log(`按钮(${info.buttons.length}):`, 'debug');
+    info.buttons.forEach((b, i) => log(`  [${i}] "${b.text}" type=${b.type} disabled=${b.disabled}`, 'debug'));
+    log(`输入框(${info.inputs.length}):`, 'debug');
+    info.inputs.forEach((inp, i) => log(`  [${i}] type=${inp.type} id=${inp.id} name=${inp.name} placeholder=${inp.placeholder}`, 'debug'));
+  } catch (e) {
+    log(`获取页面信息失败: ${e.message}`, 'debug');
+  }
+}
+
 // ========================
 // 断点续传
 // ========================
@@ -98,10 +134,13 @@ function clearProgress() {
 }
 
 // ========================
-// 点击按钮（增强版）
+// 点击按钮（增强版，多策略）
 // ========================
-async function clickNextButton(page) {
+async function clickButton(page, buttonName = 'next') {
+  // 策略1: 按钮文字匹配
   const buttonTexts = [
+    '发送验证码', '获取验证码', '发送', '获取',
+    'Send Code', 'Get Code', 'Send', 'Get',
     '下一步', '确认', '提交', '完成', '注册', '注册完成',
     '다음', '확인', '가입하기',
     'Next', 'Submit', 'Confirm', 'Continue', 'Register',
@@ -109,23 +148,64 @@ async function clickNextButton(page) {
 
   for (const text of buttonTexts) {
     try {
-      const btn = await page.$x(`//button[contains(text(), "${text}")] | //a[contains(text(), "${text}")]`);
+      const btn = await page.$x(`//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")] | //a[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")]`);
       if (btn.length > 0) {
-        await btn[0].click();
-        log(`点击按钮: ${text}`, 'info');
-        return true;
+        // 检查是否可见且未禁用
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && !el.disabled;
+        }, btn[0]).catch(() => false);
+
+        if (isVisible) {
+          await btn[0].evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+          await delay(200);
+          await btn[0].click();
+          log(`点击按钮: "${text}"`, 'info');
+          return true;
+        }
       }
     } catch {}
   }
 
-  // Puppeteer 真实点击 submit
+  // 策略2: CSS 选择器
+  const cssSelectors = [
+    'button:not([disabled])',
+    'a[class*="btn"]',
+    'div[class*="btn"]:not([disabled])',
+    'span[class*="btn"]',
+    '[role="button"]:not([disabled])',
+  ];
+
+  for (const sel of cssSelectors) {
+    try {
+      const elements = await page.$$(sel);
+      for (const el of elements) {
+        const isClickable = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' &&
+                 !el.disabled && rect.width > 0 && rect.height > 0;
+        }, el).catch(() => false);
+
+        if (isClickable) {
+          await el.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+          await delay(200);
+          await el.click();
+          log(`点击元素: ${sel}`, 'info');
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  // 策略3: submit 按钮
   try {
-    const submitBtn = await page.$('button[type="submit"]');
+    const submitBtn = await page.$('button[type="submit"]:not([disabled])');
     if (submitBtn) {
       await submitBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await new Promise(r => setTimeout(r, 300));
+      await delay(300);
       await submitBtn.click();
-      log('通过 Puppeteer 点击了 submit 按钮', 'info');
+      log('点击 submit 按钮', 'info');
       return true;
     }
   } catch {}
@@ -134,12 +214,13 @@ async function clickNextButton(page) {
 }
 
 // ========================
-// 公共注册流程（步骤3-6）
+// 公共注册流程（密码 + 条款 + 昵称）
 // ========================
 
 async function completeRegistration(page, email, nickname) {
   await delay(3000);
   await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+  await delay(1000);
 
   // 设置密码
   log('设置密码...', 'wait');
@@ -156,10 +237,12 @@ async function completeRegistration(page, email, nickname) {
     await passwordInputs[0].click({ clickCount: 3 });
     await passwordInputs[0].type(config.password, { delay: 30 });
     log('已输入密码', 'info');
+  } else {
+    log('未找到密码输入框，跳过密码设置', 'warn');
   }
 
   await delay(500);
-  await clickNextButton(page);
+  await clickButton(page, 'next');
   await delay(2000);
 
   // 同意条款
@@ -168,6 +251,8 @@ async function completeRegistration(page, email, nickname) {
   const allAgreeSelectors = [
     'input[type="checkbox"]#all',
     'input[type="checkbox"][data-testid*="all"]',
+    'input[type="checkbox"][id*="all"]',
+    'input[type="checkbox"][name*="all"]',
   ];
 
   let clicked = false;
@@ -188,7 +273,7 @@ async function completeRegistration(page, email, nickname) {
   log('已勾选条款', 'info');
 
   await delay(500);
-  await clickNextButton(page);
+  await clickButton(page, 'next');
   await delay(2000);
 
   // 设置昵称
@@ -202,48 +287,155 @@ async function completeRegistration(page, email, nickname) {
   }
 
   await delay(500);
-  await clickNextButton(page);
+  await clickButton(page, 'next');
   await delay(3000);
 
   return nickname;
 }
 
 // ========================
-// 输入邮箱并发送验证码
+// 输入邮箱并发送验证码（核心修复）
 // ========================
 
 async function inputEmailAndSendCode(page, email) {
-  const emailInput = await page.waitForSelector(
-    'input[type="email"], input[id*="email"], input[autoComplete="email"], input[name*="email"]',
-    { timeout: config.pageTimeout }
-  );
-  await emailInput.click({ clickCount: 3 });
-  await emailInput.type(email, { delay: 50 });
-  log(`已输入邮箱: ${email}`, 'info');
+  // 等待页面完全加载
+  await delay(2000);
 
-  // 触发 blur/change 事件
-  await page.click('body');
-  await delay(1000);
+  // 查找邮箱输入框（多种选择器）
+  const emailSelectors = [
+    'input[type="email"]',
+    'input[id*="email" i]',
+    'input[name*="email" i]',
+    'input[placeholder*="email" i]',
+    'input[placeholder*="邮箱" i]',
+    'input[autoComplete="email"]',
+    'input[autocomplete="email"]',
+    'input[type="text"][id*="email" i]',
+  ];
 
-  // Puppeteer 真实点击
-  try {
-    const submitBtn = await page.$('button[type="submit"]');
-    if (submitBtn) {
-      await submitBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await new Promise(r => setTimeout(r, 300));
-      await submitBtn.click();
-      log('已点击 submit 按钮', 'info');
-    } else {
-      await clickNextButton(page);
-    }
-  } catch {
-    await clickNextButton(page);
+  let emailInput = null;
+  for (const sel of emailSelectors) {
+    try {
+      emailInput = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (emailInput) {
+        log(`找到邮箱输入框: ${sel}`, 'debug');
+        break;
+      }
+    } catch {}
   }
 
-  log('已发送验证码', 'info');
+  if (!emailInput) {
+    // 截图 + 打印页面信息帮助调试
+    await debugScreenshot(page, 'no_email_input');
+    await debugPageInfo(page);
+    throw new Error('找不到邮箱输入框');
+  }
+
+  // 清空并输入邮箱
+  await emailInput.click({ clickCount: 3 });
+  await delay(200);
+  await emailInput.type(email, { delay: 80 });
+  log(`已输入邮箱: ${email}`, 'info');
+
+  // 按 Tab 触发验证（比 click body 更可靠）
+  await page.keyboard.press('Tab');
   await delay(2000);
-  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+
+  // 查找并点击"发送验证码"按钮
+  // 先尝试 XPath 文字匹配（最精准）
+  const sendCodeTexts = ['发送验证码', '获取验证码', '发送', '获取', 'Send Code', 'Get Code', 'Send'];
+
+  let clicked = false;
+  for (const text of sendCodeTexts) {
+    try {
+      const btns = await page.$x(`//button[contains(., "${text}")] | //div[contains(@class, "btn") and contains(., "${text}")] | //span[contains(., "${text}")]/parent::button | //span[contains(., "${text}")]/parent::div | //a[contains(., "${text}")]`);
+      for (const btn of btns) {
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' &&
+                 !el.disabled && rect.width > 0 && rect.height > 0;
+        }, btn).catch(() => false);
+
+        if (isVisible) {
+          await btn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+          await delay(300);
+          await btn.click();
+          log(`点击发送验证码按钮: "${text}"`, 'success');
+          clicked = true;
+          break;
+        }
+      }
+      if (clicked) break;
+    } catch {}
+  }
+
+  // 备选：找所有可点击按钮，按位置排序（底部按钮更可能是提交按钮）
+  if (!clicked) {
+    log('文字匹配未找到按钮，尝试位置匹配...', 'debug');
+    try {
+      const allButtons = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button, [role="button"], div[class*="btn"], a[class*="btn"]'))
+          .filter(el => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                   !el.disabled && rect.width > 50 && rect.height > 20;
+          })
+          .map((el, idx) => ({
+            idx,
+            tag: el.tagName,
+            text: el.textContent.trim().substring(0, 60),
+            type: el.type || '',
+            rect: el.getBoundingClientRect(),
+          }))
+          .sort((a, b) => b.rect.y - a.rect.y); // 按 Y 坐标降序（底部优先）
+      });
+
+      log(`页面可见按钮: ${JSON.stringify(allButtons.map(b => `"${b.text}"`))}`, 'debug');
+
+      // 尝试点击最底部的按钮（通常是提交按钮）
+      if (allButtons.length > 0) {
+        const targetBtn = allButtons[0]; // 最底部的
+        const handle = await page.evaluateHandle((tag, text) => {
+          const els = document.querySelectorAll(tag);
+          return Array.from(els).find(el => el.textContent.trim().includes(text));
+        }, targetBtn.tag, targetBtn.text.substring(0, 10));
+
+        if (handle) {
+          await handle.asElement().click();
+          log(`点击底部按钮: "${targetBtn.text}"`, 'success');
+          clicked = true;
+        }
+      }
+    } catch (e) {
+      log(`位置匹配失败: ${e.message}`, 'debug');
+    }
+  }
+
+  if (!clicked) {
+    await debugScreenshot(page, 'no_send_button');
+    await debugPageInfo(page);
+    throw new Error('找不到发送验证码按钮，请查看 debug 截图');
+  }
+
+  // 等待页面响应（可能是导航或 AJAX）
+  log('等待页面响应...', 'wait');
   await delay(2000);
+
+  // 等待导航（如果有的话）
+  try {
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 });
+    log('页面已跳转', 'info');
+  } catch {
+    log('无页面跳转（可能是同页 AJAX）', 'debug');
+  }
+
+  await delay(2000);
+
+  // 截图确认当前状态
+  await debugScreenshot(page, 'after_send_code');
+  log('已发送验证码，当前页面状态已截图', 'info');
 }
 
 // ========================
@@ -251,24 +443,65 @@ async function inputEmailAndSendCode(page, email) {
 // ========================
 
 async function inputVerificationCode(page, code) {
-  const inputs = await page.$$('input[type="tel"], input[type="number"], input[inputmode="numeric"], input[maxlength="1"], input[maxlength="6"]');
+  // 等待验证码输入区域出现
+  await delay(1000);
+
+  // 尝试多种输入框选择器
+  const selectors = [
+    'input[type="tel"]',
+    'input[type="number"]',
+    'input[inputmode="numeric"]',
+    'input[maxlength="1"]',
+    'input[maxlength="6"]',
+    'input[maxlength="4"]',
+    'input[id*="code" i]',
+    'input[name*="code" i]',
+    'input[placeholder*="验证码" i]',
+    'input[placeholder*="code" i]',
+  ];
+
+  let inputs = [];
+  for (const sel of selectors) {
+    try {
+      inputs = await page.$$(sel);
+      if (inputs.length > 0) {
+        log(`找到验证码输入框: ${sel} (${inputs.length}个)`, 'debug');
+        break;
+      }
+    } catch {}
+  }
 
   if (inputs.length >= 6) {
+    // 6个单独的输入框（每位一个）
     for (let i = 0; i < 6; i++) {
       await inputs[i].click();
+      await delay(100);
       await inputs[i].type(code[i], { delay: 30 });
     }
+    log('已输入验证码（6个独立框）', 'info');
   } else if (inputs.length >= 1) {
+    // 单个输入框，输入完整验证码
     await inputs[0].click({ clickCount: 3 });
-    await inputs[0].type(code, { delay: 50 });
+    await delay(100);
+    await inputs[0].type(code, { delay: 80 });
+    log('已输入验证码（单框）', 'info');
   } else {
-    await page.keyboard.type(code, { delay: 50 });
+    // 回退到键盘输入
+    await page.keyboard.type(code, { delay: 80 });
+    log('已通过键盘输入验证码', 'info');
   }
-  log('已输入验证码', 'info');
+
+  // 输入完成后按 Tab 或点击其他地方触发验证
+  await page.keyboard.press('Tab');
+  await delay(1000);
+
+  // 点击确认/下一步按钮
+  await clickButton(page, 'confirm');
+  await delay(2000);
 }
 
 // ========================
-// 核心注册函数（带回调，支持重试）
+// 核心注册函数
 // ========================
 
 async function doRegister(browser, mode, email, referralCode, gmailInbox) {
@@ -276,7 +509,7 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
   await page.setUserAgent(randomUA());
   await page.setViewport({ width: 1280, height: 800 });
 
-  // 反检测（每个新页面都设置）
+  // 反检测
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -305,13 +538,17 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
       log(`Gmail 别名: ${finalEmail}`, 'success');
     }
 
-    log('打开注册页面', 'wait');
+    log('打开注册页面...', 'wait');
     await page.goto(url, { waitUntil: 'networkidle2', timeout: config.pageTimeout });
+    await delay(3000); // 额外等 SPA 渲染
 
-    // 输入邮箱
+    // 截图确认页面加载
+    await debugScreenshot(page, 'page_loaded');
+
+    // 步骤1: 输入邮箱 + 发送验证码
     await inputEmailAndSendCode(page, finalEmail);
 
-    // 获取验证码
+    // 步骤2: 获取验证码
     let code;
     if (mode === '1') {
       code = await tempMail.waitForVerificationCode(config.verificationTimeout, 5000);
@@ -324,16 +561,15 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
     }
     log(`验证码: ${code}`, 'success');
 
+    // 步骤3: 输入验证码
     await inputVerificationCode(page, code);
 
-    // 点击提交验证码后的下一步按钮
-    await delay(1000);
-    await clickNextButton(page);
+    // 步骤4: 等待跳转到密码设置页面
     await delay(2000);
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
     await delay(2000);
 
-    // 设置密码 + 同意条款 + 设置昵称
+    // 步骤5: 设置密码 + 同意条款 + 设置昵称
     const nickname = await completeRegistration(page, finalEmail, null);
 
     log(`✅ 注册成功: ${finalEmail}`, 'success');
@@ -372,7 +608,6 @@ async function registerWithRetry(browser, mode, email, referralCode, gmailInbox)
     }
   }
 
-  // 所有重试都失败
   return { success: false, email, error: `重试 ${maxRetries} 次后仍失败` };
 }
 
@@ -384,7 +619,7 @@ async function main() {
   console.log(`
 ╔══════════════════════════════════════╗
 ║     NOL World 账户批量注册工具       ║
-║     v1.2 — 支持重试/断点续传         ║
+║     v1.3 — 修复按钮点击 + 调试截图   ║
 ╚══════════════════════════════════════╝
   `);
 
@@ -471,10 +706,12 @@ async function main() {
       const paths = [
         'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
         'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       ];
-      const fs = require('fs');
-      for (const p of paths) { if (fs.existsSync(p)) return p; }
-      return undefined; // 让 Puppeteer 用自带 Chromium
+      for (const p of paths) { try { if (fs.existsSync(p)) return p; } catch {} }
+      return undefined;
     })(),
     args: [
       '--no-sandbox',
@@ -571,4 +808,3 @@ main().catch(err => {
   log(`程序异常: ${err.message}`, 'error');
   process.exit(1);
 });
-

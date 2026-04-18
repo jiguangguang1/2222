@@ -1,11 +1,9 @@
 {
   "name": "nol-auto-register",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "NOL World 批量注册账户工具",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "puppeteer": "^23.0.0",
     "axios": "^1.7.0",

@@ -2,6 +2,7 @@ node_modules/
 accounts.txt
 register_results.json
 error_*.png
+debug_*.png
 config.local.js
 .env
 progress.json
