@@ -298,7 +298,6 @@ async function completeRegistration(page, email, nickname) {
 // ========================
 
 async function inputEmailAndSendCode(page, email) {
-  // 等待页面完全加载
   await delay(3000);
 
   // 查找邮箱输入框
@@ -329,81 +328,91 @@ async function inputEmailAndSendCode(page, email) {
     throw new Error('找不到邮箱输入框');
   }
 
-  // 清空并输入邮箱（用 focus + evaluate 设置值，更可靠）
+  // 输入邮箱
   await emailInput.focus();
   await delay(200);
-  // 先清空
   await page.evaluate(el => { el.value = ''; }, emailInput);
   await emailInput.type(email, { delay: 50 });
   log(`已输入邮箱: ${email}`, 'info');
 
-  // 触发 input/change 事件，让页面知道邮箱已输入
+  // 触发事件让页面验证邮箱
   await page.evaluate(el => {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('blur', { bubbles: true }));
   }, emailInput);
 
-  log('已触发输入事件，等待按钮变为可用...', 'wait');
+  log('等待按钮变为可用...', 'wait');
 
-  // 等待发送按钮从 disabled 变为可用（最多等 15 秒）
+  // 等待按钮出现并可用（通过文字精准匹配）
   // 按钮: <button type="submit" ... disabled="">发送验证信至电子邮箱</button>
   let sendBtn = null;
   for (let i = 0; i < 30; i++) {
     await delay(500);
 
-    // 查找 submit 按钮（不管是否 disabled）
-    sendBtn = await page.$('button[type="submit"]');
-    if (sendBtn) {
-      const isDisabled = await page.evaluate(el => el.disabled, sendBtn).catch(() => true);
-      const btnText = await page.evaluate(el => el.textContent.trim(), sendBtn).catch(() => '');
+    // 通过 evaluate 在页面中精确查找包含 "发送验证信" 的按钮
+    const btnHandle = await page.evaluateHandle(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码') || btn.textContent.includes('Send')) {
+          return btn;
+        }
+      }
+      return null;
+    });
+
+    const el = btnHandle.asElement();
+    if (el) {
+      const isDisabled = await page.evaluate(b => b.disabled, el).catch(() => true);
+      const btnText = await page.evaluate(b => b.textContent.trim(), el).catch(() => '');
 
       if (i % 5 === 0) {
-        log(`按钮状态: "${btnText}" disabled=${isDisabled} (等待中 ${i * 0.5}s)`, 'debug');
+        log(`找到按钮: "${btnText}" disabled=${isDisabled}`, 'debug');
       }
 
       if (!isDisabled) {
-        log(`按钮已变为可用: "${btnText}"`, 'success');
+        sendBtn = el;
+        log(`按钮已可用: "${btnText}"`, 'success');
         break;
       }
     }
-    sendBtn = null;
   }
 
-  // 如果按钮仍然是 disabled，强制移除 disabled 并点击
+  // 如果按钮仍然是 disabled，强制移除
   if (!sendBtn) {
     log('按钮未自动变为可用，尝试强制点击...', 'warn');
-    sendBtn = await page.$('button[type="submit"]');
-    if (sendBtn) {
-      await page.evaluate(el => {
-        el.disabled = false;
-        el.removeAttribute('disabled');
-      }, sendBtn);
-      log('已移除 disabled 属性', 'debug');
-    }
+    sendBtn = await page.evaluateHandle(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
+          btn.disabled = false;
+          btn.removeAttribute('disabled');
+          return btn;
+        }
+      }
+      return null;
+    }).then(h => h.asElement()).catch(() => null);
   }
 
   if (!sendBtn) {
-    await debugScreenshot(page, 'no_submit_btn');
+    await debugScreenshot(page, 'no_send_btn');
     await debugPageInfo(page);
-    throw new Error('找不到发送按钮');
+    throw new Error('找不到"发送验证信至电子邮箱"按钮');
   }
 
-  // 点击发送按钮
+  // 点击按钮
   await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
   await delay(300);
   await sendBtn.click();
   log('已点击发送验证码按钮', 'success');
 
   // 等待页面响应
-  log('等待页面响应...', 'wait');
   await delay(3000);
-
   try {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
     log('页面已跳转', 'info');
   } catch {
-    log('无页面跳转（可能是同页 AJAX）', 'debug');
+    log('无页面跳转（同页 AJAX）', 'debug');
   }
 
   await delay(2000);

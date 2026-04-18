@@ -120,7 +120,7 @@ class GmailInbox {
         await this.ensureConnected();
         const lock = await this.client.getMailboxLock('INBOX');
         try {
-          const searchResult = await this.client.search({ seen: false });
+          const searchResult = (await this.client.search({ seen: false })) || [];
 
           for (const uid of searchResult) {
             if (seenUids.has(uid)) continue;
