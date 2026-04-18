@@ -299,9 +299,9 @@ async function completeRegistration(page, email, nickname) {
 
 async function inputEmailAndSendCode(page, email) {
   // 等待页面完全加载
-  await delay(2000);
+  await delay(3000);
 
-  // 查找邮箱输入框（多种选择器）
+  // 查找邮箱输入框
   const emailSelectors = [
     'input[type="email"]',
     'input[id*="email" i]',
@@ -310,7 +310,6 @@ async function inputEmailAndSendCode(page, email) {
     'input[placeholder*="邮箱" i]',
     'input[autoComplete="email"]',
     'input[autocomplete="email"]',
-    'input[type="text"][id*="email" i]',
   ];
 
   let emailInput = null;
@@ -325,117 +324,90 @@ async function inputEmailAndSendCode(page, email) {
   }
 
   if (!emailInput) {
-    // 截图 + 打印页面信息帮助调试
     await debugScreenshot(page, 'no_email_input');
     await debugPageInfo(page);
     throw new Error('找不到邮箱输入框');
   }
 
-  // 清空并输入邮箱
-  await emailInput.click({ clickCount: 3 });
+  // 清空并输入邮箱（用 focus + evaluate 设置值，更可靠）
+  await emailInput.focus();
   await delay(200);
-  await emailInput.type(email, { delay: 80 });
+  // 先清空
+  await page.evaluate(el => { el.value = ''; }, emailInput);
+  await emailInput.type(email, { delay: 50 });
   log(`已输入邮箱: ${email}`, 'info');
 
-  // 按 Tab 触发验证（比 click body 更可靠）
-  await page.keyboard.press('Tab');
-  await delay(2000);
+  // 触发 input/change 事件，让页面知道邮箱已输入
+  await page.evaluate(el => {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+  }, emailInput);
 
-  // 查找并点击"发送验证码"按钮
-  // 先尝试 XPath 文字匹配（最精准）
-  const sendCodeTexts = ['发送验证码', '获取验证码', '发送', '获取', 'Send Code', 'Get Code', 'Send'];
+  log('已触发输入事件，等待按钮变为可用...', 'wait');
 
-  let clicked = false;
-  for (const text of sendCodeTexts) {
-    try {
-      const btns = await page.$x(`//button[contains(., "${text}")] | //div[contains(@class, "btn") and contains(., "${text}")] | //span[contains(., "${text}")]/parent::button | //span[contains(., "${text}")]/parent::div | //a[contains(., "${text}")]`);
-      for (const btn of btns) {
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          const rect = el.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' &&
-                 !el.disabled && rect.width > 0 && rect.height > 0;
-        }, btn).catch(() => false);
+  // 等待发送按钮从 disabled 变为可用（最多等 15 秒）
+  // 按钮: <button type="submit" ... disabled="">发送验证信至电子邮箱</button>
+  let sendBtn = null;
+  for (let i = 0; i < 30; i++) {
+    await delay(500);
 
-        if (isVisible) {
-          await btn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-          await delay(300);
-          await btn.click();
-          log(`点击发送验证码按钮: "${text}"`, 'success');
-          clicked = true;
-          break;
-        }
+    // 查找 submit 按钮（不管是否 disabled）
+    sendBtn = await page.$('button[type="submit"]');
+    if (sendBtn) {
+      const isDisabled = await page.evaluate(el => el.disabled, sendBtn).catch(() => true);
+      const btnText = await page.evaluate(el => el.textContent.trim(), sendBtn).catch(() => '');
+
+      if (i % 5 === 0) {
+        log(`按钮状态: "${btnText}" disabled=${isDisabled} (等待中 ${i * 0.5}s)`, 'debug');
       }
-      if (clicked) break;
-    } catch {}
+
+      if (!isDisabled) {
+        log(`按钮已变为可用: "${btnText}"`, 'success');
+        break;
+      }
+    }
+    sendBtn = null;
   }
 
-  // 备选：找所有可点击按钮，按位置排序（底部按钮更可能是提交按钮）
-  if (!clicked) {
-    log('文字匹配未找到按钮，尝试位置匹配...', 'debug');
-    try {
-      const allButtons = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('button, [role="button"], div[class*="btn"], a[class*="btn"]'))
-          .filter(el => {
-            const style = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' &&
-                   !el.disabled && rect.width > 50 && rect.height > 20;
-          })
-          .map((el, idx) => ({
-            idx,
-            tag: el.tagName,
-            text: el.textContent.trim().substring(0, 60),
-            type: el.type || '',
-            rect: el.getBoundingClientRect(),
-          }))
-          .sort((a, b) => b.rect.y - a.rect.y); // 按 Y 坐标降序（底部优先）
-      });
-
-      log(`页面可见按钮: ${JSON.stringify(allButtons.map(b => `"${b.text}"`))}`, 'debug');
-
-      // 尝试点击最底部的按钮（通常是提交按钮）
-      if (allButtons.length > 0) {
-        const targetBtn = allButtons[0]; // 最底部的
-        const handle = await page.evaluateHandle((tag, text) => {
-          const els = document.querySelectorAll(tag);
-          return Array.from(els).find(el => el.textContent.trim().includes(text));
-        }, targetBtn.tag, targetBtn.text.substring(0, 10));
-
-        if (handle) {
-          await handle.asElement().click();
-          log(`点击底部按钮: "${targetBtn.text}"`, 'success');
-          clicked = true;
-        }
-      }
-    } catch (e) {
-      log(`位置匹配失败: ${e.message}`, 'debug');
+  // 如果按钮仍然是 disabled，强制移除 disabled 并点击
+  if (!sendBtn) {
+    log('按钮未自动变为可用，尝试强制点击...', 'warn');
+    sendBtn = await page.$('button[type="submit"]');
+    if (sendBtn) {
+      await page.evaluate(el => {
+        el.disabled = false;
+        el.removeAttribute('disabled');
+      }, sendBtn);
+      log('已移除 disabled 属性', 'debug');
     }
   }
 
-  if (!clicked) {
-    await debugScreenshot(page, 'no_send_button');
+  if (!sendBtn) {
+    await debugScreenshot(page, 'no_submit_btn');
     await debugPageInfo(page);
-    throw new Error('找不到发送验证码按钮，请查看 debug 截图');
+    throw new Error('找不到发送按钮');
   }
 
-  // 等待页面响应（可能是导航或 AJAX）
-  log('等待页面响应...', 'wait');
-  await delay(2000);
+  // 点击发送按钮
+  await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+  await delay(300);
+  await sendBtn.click();
+  log('已点击发送验证码按钮', 'success');
 
-  // 等待导航（如果有的话）
+  // 等待页面响应
+  log('等待页面响应...', 'wait');
+  await delay(3000);
+
   try {
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 });
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
     log('页面已跳转', 'info');
   } catch {
     log('无页面跳转（可能是同页 AJAX）', 'debug');
   }
 
   await delay(2000);
-
-  // 截图确认当前状态
   await debugScreenshot(page, 'after_send_code');
-  log('已发送验证码，当前页面状态已截图', 'info');
 }
 
 // ========================
