@@ -1,0 +1,4 @@
+node_modules/
+register_results.json
+error_*.png
+package-lock.json

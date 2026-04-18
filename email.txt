@@ -1,0 +1,5 @@
+# 每行一个邮箱地址，# 开头的行为注释
+# 示例：
+# user1@gmail.com
+# user2@gmail.com
+# user3@gmail.com
