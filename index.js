@@ -437,7 +437,14 @@ async function main() {
     }
     log('连接 Gmail...', 'wait');
     gmailInbox = new GmailInbox(config.gmail.user, config.gmail.appPassword);
-    await gmailInbox.connect();
+    try {
+      await gmailInbox.connect();
+    } catch (err) {
+      log(`Gmail 连接失败: ${err.message}`, 'error');
+      log('可能原因: 1) 网络/VPN问题 2) IMAP未开启 3) 应用密码错误', 'error');
+      log('请检查: https://mail.google.com/mail/u/0/#settings/fwdandpop 确保IMAP已启用', 'info');
+      process.exit(1);
+    }
   }
 
   // 运行时选择 headless
@@ -452,7 +459,15 @@ async function main() {
   log('启动浏览器...', 'wait');
   const browser = await puppeteer.launch({
     headless: config.headless,
-    executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    executablePath: (function() {
+      const paths = [
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      ];
+      const fs = require('fs');
+      for (const p of paths) { if (fs.existsSync(p)) return p; }
+      return undefined; // 让 Puppeteer 用自带 Chromium
+    })(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
