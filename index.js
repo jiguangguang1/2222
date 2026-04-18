@@ -3,6 +3,7 @@ const fs = require('fs');
 const readline = require('readline');
 const config = require('./config');
 const TempMail = require('./tempmail');
+const GmailInbox = require('./gmail');
 
 // ========================
 // 工具函数
@@ -22,6 +23,13 @@ function delay(ms) {
 function generateNickname(prefix) {
   const rand = Math.random().toString(36).substring(2, 8);
   return `${prefix}_${rand}`;
+}
+
+function generateGmailAlias(baseEmail) {
+  // Gmail + 别名: user+random@gmail.com
+  const [localPart, domain] = baseEmail.split('@');
+  const rand = Math.random().toString(36).substring(2, 8) + Date.now().toString(36).slice(-4);
+  return `${localPart}+nol_${rand}@${domain}`;
 }
 
 function readEmails() {
@@ -55,7 +63,6 @@ async function clickNextButton(page) {
     } catch {}
   }
 
-  // 尝试找 submit 类型按钮
   try {
     const submitBtn = await page.$('button[type="submit"]');
     if (submitBtn) {
@@ -72,7 +79,132 @@ async function clickNextButton(page) {
 }
 
 // ========================
-// 核心：全自动注册（使用临时邮箱）
+// 公共注册流程（步骤3-6）
+// ========================
+
+async function completeRegistration(page, email, nickname) {
+  // 等待自动验证并跳转
+  await delay(3000);
+  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+
+  // 设置密码
+  log('设置密码...', 'wait');
+  await delay(1000);
+
+  const passwordInputs = await page.$$('input[type="password"]');
+  if (passwordInputs.length >= 2) {
+    await passwordInputs[0].click({ clickCount: 3 });
+    await passwordInputs[0].type(config.password, { delay: 30 });
+    await passwordInputs[1].click({ clickCount: 3 });
+    await passwordInputs[1].type(config.password, { delay: 30 });
+    log('已输入密码（新密码 + 确认）', 'info');
+  } else if (passwordInputs.length === 1) {
+    await passwordInputs[0].click({ clickCount: 3 });
+    await passwordInputs[0].type(config.password, { delay: 30 });
+    log('已输入密码', 'info');
+  }
+
+  await delay(500);
+  await clickNextButton(page);
+  await delay(2000);
+
+  // 同意条款
+  log('同意条款...', 'wait');
+
+  const allAgreeSelectors = [
+    'input[type="checkbox"]#all',
+    'input[type="checkbox"][data-testid*="all"]',
+  ];
+
+  let clicked = false;
+  for (const sel of allAgreeSelectors) {
+    try {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click();
+        clicked = true;
+        break;
+      }
+    } catch {}
+  }
+
+  if (!clicked) {
+    const checkboxes = await page.$$('input[type="checkbox"]');
+    for (const cb of checkboxes) {
+      const checked = await page.evaluate(el => el.checked, cb).catch(() => false);
+      if (!checked) {
+        await cb.click().catch(() => {});
+      }
+    }
+  }
+  log('已勾选条款', 'info');
+
+  await delay(500);
+  await clickNextButton(page);
+  await delay(2000);
+
+  // 设置昵称
+  nickname = nickname || generateNickname(config.nicknamePrefix);
+  log(`设置昵称: ${nickname}`, 'wait');
+
+  const nicknameInput = await page.$('input[type="text"]');
+  if (nicknameInput) {
+    await nicknameInput.click({ clickCount: 3 });
+    await nicknameInput.type(nickname, { delay: 30 });
+  }
+
+  await delay(500);
+  await clickNextButton(page);
+  await delay(3000);
+
+  return nickname;
+}
+
+// ========================
+// 输入邮箱并发送验证码（公共步骤1-2）
+// ========================
+
+async function inputEmailAndSendCode(page, email) {
+  const emailInput = await page.waitForSelector(
+    'input[type="email"], input[id*="email"], input[autoComplete="email"]',
+    { timeout: config.pageTimeout }
+  );
+  await emailInput.click({ clickCount: 3 });
+  await emailInput.type(email, { delay: 50 });
+  log(`已输入邮箱: ${email}`, 'info');
+
+  await delay(500);
+  const submitBtn = await page.waitForSelector('button[type="submit"]', { timeout: 10000 });
+  await submitBtn.click();
+  log('已发送验证码', 'info');
+
+  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+  await delay(2000);
+}
+
+// ========================
+// 输入验证码（公共步骤2）
+// ========================
+
+async function inputVerificationCode(page, code) {
+  const inputs = await page.$$('input[type="tel"], input[type="number"], input[inputmode="numeric"], input[maxlength="1"], input[maxlength="6"]');
+
+  if (inputs.length >= 6) {
+    for (let i = 0; i < 6; i++) {
+      await inputs[i].click();
+      await inputs[i].type(code[i], { delay: 30 });
+    }
+  } else if (inputs.length >= 1) {
+    await inputs[0].click({ clickCount: 3 });
+    await inputs[0].type(code, { delay: 50 });
+  } else {
+    await page.keyboard.type(code, { delay: 50 });
+  }
+  log('已输入验证码', 'info');
+}
+
+// ========================
+// 核心：全自动注册（mail.tm 临时邮箱）
 // ========================
 
 async function registerAuto(browser, referralCode) {
@@ -81,141 +213,29 @@ async function registerAuto(browser, referralCode) {
   let email;
 
   try {
-    // ---- 创建临时邮箱 ----
     log('创建临时邮箱...', 'wait');
     email = await tempMail.createAccount('nol');
     log(`临时邮箱: ${email}`, 'success');
 
-    // 设置 viewport
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 构建注册URL
     let url = config.baseUrl;
     if (referralCode) {
       url += `?returnUrl=/?ref=${encodeURIComponent(referralCode)}`;
     }
 
-    log(`打开注册页面`, 'wait');
+    log('打开注册页面', 'wait');
     await page.goto(url, { waitUntil: 'networkidle2', timeout: config.pageTimeout });
 
-    // ---- 步骤1：输入邮箱，发送验证码 ----
-    const emailInput = await page.waitForSelector(
-      'input[type="email"], input[id*="email"], input[autoComplete="email"]',
-      { timeout: config.pageTimeout }
-    );
-    await emailInput.click({ clickCount: 3 });
-    await emailInput.type(email, { delay: 50 });
-    log(`已输入邮箱: ${email}`, 'info');
+    await inputEmailAndSendCode(page, email);
 
-    await delay(500);
-    const submitBtn = await page.waitForSelector('button[type="submit"]', { timeout: 10000 });
-    await submitBtn.click();
-    log('已发送验证码', 'info');
-
-    // 等待跳转到验证码页面
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-    await delay(2000);
-
-    // ---- 步骤2：自动等待验证码 ----
     const code = await tempMail.waitForVerificationCode(config.verificationTimeout, 5000);
     log(`自动获取验证码: ${code}`, 'success');
 
-    // ---- 步骤3：输入验证码 ----
-    // NOL World 可能是6个独立输入框或1个整体输入框
-    const inputs = await page.$$('input[type="tel"], input[type="number"], input[inputmode="numeric"], input[maxlength="1"], input[maxlength="6"]');
+    await inputVerificationCode(page, code);
 
-    if (inputs.length >= 6) {
-      // 6个独立输入框
-      for (let i = 0; i < 6; i++) {
-        await inputs[i].click();
-        await inputs[i].type(code[i], { delay: 30 });
-      }
-    } else if (inputs.length >= 1) {
-      // 单个输入框
-      await inputs[0].click({ clickCount: 3 });
-      await inputs[0].type(code, { delay: 50 });
-    } else {
-      await page.keyboard.type(code, { delay: 50 });
-    }
-    log('已输入验证码', 'info');
+    const nickname = await completeRegistration(page, email);
 
-    // 等待自动验证并跳转
-    await delay(3000);
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-
-    // ---- 步骤4：设置密码 ----
-    log('设置密码...', 'wait');
-    await delay(1000);
-
-    const passwordInputs = await page.$$('input[type="password"]');
-    if (passwordInputs.length >= 2) {
-      await passwordInputs[0].click({ clickCount: 3 });
-      await passwordInputs[0].type(config.password, { delay: 30 });
-      await passwordInputs[1].click({ clickCount: 3 });
-      await passwordInputs[1].type(config.password, { delay: 30 });
-      log('已输入密码（新密码 + 确认）', 'info');
-    } else if (passwordInputs.length === 1) {
-      await passwordInputs[0].click({ clickCount: 3 });
-      await passwordInputs[0].type(config.password, { delay: 30 });
-      log('已输入密码', 'info');
-    }
-
-    await delay(500);
-    await clickNextButton(page);
-    await delay(2000);
-
-    // ---- 步骤5：同意条款 ----
-    log('同意条款...', 'wait');
-
-    // 先尝试找"全部同意"按钮/复选框
-    const allAgreeSelectors = [
-      'input[type="checkbox"]#all',
-      'input[type="checkbox"][data-testid*="all"]',
-    ];
-
-    let clicked = false;
-    for (const sel of allAgreeSelectors) {
-      try {
-        const el = await page.$(sel);
-        if (el) {
-          await el.click();
-          clicked = true;
-          break;
-        }
-      } catch {}
-    }
-
-    if (!clicked) {
-      // 逐个勾选所有复选框
-      const checkboxes = await page.$$('input[type="checkbox"]');
-      for (const cb of checkboxes) {
-        const checked = await page.evaluate(el => el.checked, cb).catch(() => false);
-        if (!checked) {
-          await cb.click().catch(() => {});
-        }
-      }
-    }
-    log('已勾选条款', 'info');
-
-    await delay(500);
-    await clickNextButton(page);
-    await delay(2000);
-
-    // ---- 步骤6：设置昵称 ----
-    const nickname = generateNickname(config.nicknamePrefix);
-    log(`设置昵称: ${nickname}`, 'wait');
-
-    const nicknameInput = await page.$('input[type="text"]');
-    if (nicknameInput) {
-      await nicknameInput.click({ clickCount: 3 });
-      await nicknameInput.type(nickname, { delay: 30 });
-    }
-
-    await delay(500);
-    await clickNextButton(page);
-    await delay(3000);
-
-    // ---- 完成 ----
     log(`✅ 注册成功: ${email} (昵称: ${nickname})`, 'success');
     return { success: true, email, nickname, password: config.password };
 
@@ -232,7 +252,52 @@ async function registerAuto(browser, referralCode) {
 }
 
 // ========================
-// 核心：手动邮箱注册（使用 email.txt 中的邮箱）
+// 核心：Gmail 自动注册（+ 别名）
+// ========================
+
+async function registerGmail(browser, gmailInbox, referralCode) {
+  const page = await browser.newPage();
+  const email = generateGmailAlias(config.gmail.user);
+  let nickname;
+
+  try {
+    log(`Gmail 别名邮箱: ${email}`, 'success');
+
+    await page.setViewport({ width: 1280, height: 800 });
+
+    let url = config.baseUrl;
+    if (referralCode) {
+      url += `?returnUrl=/?ref=${encodeURIComponent(referralCode)}`;
+    }
+
+    log('打开注册页面', 'wait');
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: config.pageTimeout });
+
+    await inputEmailAndSendCode(page, email);
+
+    const code = await gmailInbox.waitForVerificationCode(config.verificationTimeout, 5000);
+    log(`自动获取验证码: ${code}`, 'success');
+
+    await inputVerificationCode(page, code);
+
+    nickname = await completeRegistration(page, email);
+
+    log(`✅ 注册成功: ${email} (昵称: ${nickname})`, 'success');
+    return { success: true, email, nickname, password: config.password };
+
+  } catch (error) {
+    log(`注册失败: ${email} - ${error.message}`, 'error');
+    const screenshotPath = `error_${email.replace(/[@.]/g, '_')}_${Date.now()}.png`;
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    log(`错误截图: ${screenshotPath}`, 'warn');
+    return { success: false, email, error: error.message };
+  } finally {
+    await page.close();
+  }
+}
+
+// ========================
+// 核心：手动邮箱注册
 // ========================
 
 async function registerManual(browser, email, referralCode) {
@@ -249,23 +314,8 @@ async function registerManual(browser, email, referralCode) {
     log(`打开注册页面: ${email}`, 'wait');
     await page.goto(url, { waitUntil: 'networkidle2', timeout: config.pageTimeout });
 
-    // 步骤1：输入邮箱，发送验证码
-    const emailInput = await page.waitForSelector(
-      'input[type="email"], input[id*="email"], input[autoComplete="email"]',
-      { timeout: config.pageTimeout }
-    );
-    await emailInput.click({ clickCount: 3 });
-    await emailInput.type(email, { delay: 50 });
+    await inputEmailAndSendCode(page, email);
 
-    await delay(500);
-    const submitBtn = await page.waitForSelector('button[type="submit"]', { timeout: 10000 });
-    await submitBtn.click();
-    log('已发送验证码', 'info');
-
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-    await delay(2000);
-
-    // 步骤2：手动输入验证码
     log(`📧 验证码已发送到: ${email}`, 'success');
     const code = await askInput('请输入6位验证码: ');
 
@@ -273,57 +323,9 @@ async function registerManual(browser, email, referralCode) {
       throw new Error('验证码格式错误');
     }
 
-    // 输入验证码
-    const inputs = await page.$$('input[type="tel"], input[type="number"], input[inputmode="numeric"], input[maxlength="1"], input[maxlength="6"]');
-    if (inputs.length >= 6) {
-      for (let i = 0; i < 6; i++) {
-        await inputs[i].click();
-        await inputs[i].type(code[i], { delay: 30 });
-      }
-    } else if (inputs.length >= 1) {
-      await inputs[0].click({ clickCount: 3 });
-      await inputs[0].type(code, { delay: 50 });
-    }
+    await inputVerificationCode(page, code);
 
-    await delay(3000);
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-
-    // 步骤3-6：同自动模式
-    // 密码
-    const passwordInputs = await page.$$('input[type="password"]');
-    if (passwordInputs.length >= 2) {
-      await passwordInputs[0].click({ clickCount: 3 });
-      await passwordInputs[0].type(config.password, { delay: 30 });
-      await passwordInputs[1].click({ clickCount: 3 });
-      await passwordInputs[1].type(config.password, { delay: 30 });
-    } else if (passwordInputs.length === 1) {
-      await passwordInputs[0].click({ clickCount: 3 });
-      await passwordInputs[0].type(config.password, { delay: 30 });
-    }
-    await delay(500);
-    await clickNextButton(page);
-    await delay(2000);
-
-    // 条款
-    const checkboxes = await page.$$('input[type="checkbox"]');
-    for (const cb of checkboxes) {
-      const checked = await page.evaluate(el => el.checked, cb).catch(() => false);
-      if (!checked) await cb.click().catch(() => {});
-    }
-    await delay(500);
-    await clickNextButton(page);
-    await delay(2000);
-
-    // 昵称
-    const nickname = generateNickname(config.nicknamePrefix);
-    const nicknameInput = await page.$('input[type="text"]');
-    if (nicknameInput) {
-      await nicknameInput.click({ clickCount: 3 });
-      await nicknameInput.type(nickname, { delay: 30 });
-    }
-    await delay(500);
-    await clickNextButton(page);
-    await delay(3000);
+    const nickname = await completeRegistration(page, email);
 
     log(`✅ 注册成功: ${email} (昵称: ${nickname})`, 'success');
     return { success: true, email, nickname, password: config.password };
@@ -346,44 +348,53 @@ async function main() {
   console.log(`
 ╔══════════════════════════════════════╗
 ║     NOL World 账户批量注册工具       ║
-║     支持自动 / 手动两种模式          ║
+║     v1.1 — 支持3种模式               ║
 ╚══════════════════════════════════════╝
   `);
 
-  // 选择模式
   console.log('请选择注册模式:');
-  console.log('  1. 🤖 全自动模式 — 自动创建临时邮箱，自动收验证码');
-  console.log('  2. 📧 手动模式 — 使用 email.txt 中的邮箱，手动输入验证码');
-  const mode = await askInput('请输入 1 或 2: ');
+  console.log('  1. 🤖 全自动模式 — mail.tm 临时邮箱');
+  console.log('  2. 📧 手动模式 — 使用 email.txt 中的邮箱');
+  console.log('  3. 📬 Gmail 模式 — Gmail + 别名，自动收验证码');
+  const mode = await askInput('请输入 1、2 或 3: ');
 
-  const isAuto = mode === '1';
-
-  // 获取邀请码
   let referralCode = config.defaultReferralCode;
   if (!referralCode) {
     referralCode = await askInput('请输入邀请码 (可留空): ');
   }
 
-  // 确定注册数量
   let count;
-  if (isAuto) {
+  let gmailInbox = null;
+
+  if (mode === '1') {
     count = parseInt(await askInput('请输入要注册的数量: '), 10);
-    if (isNaN(count) || count < 1) {
-      log('数量无效', 'error');
-      process.exit(1);
-    }
-  } else {
-    // 手动模式从 email.txt 读取
+    if (isNaN(count) || count < 1) { log('数量无效', 'error'); process.exit(1); }
+  } else if (mode === '2') {
     var emails = readEmails();
-    if (emails.length === 0) {
-      log('email.txt 为空', 'error');
-      process.exit(1);
-    }
+    if (emails.length === 0) { log('email.txt 为空', 'error'); process.exit(1); }
     count = emails.length;
     log(`共加载 ${count} 个邮箱`, 'info');
+  } else if (mode === '3') {
+    // 检查 Gmail 配置
+    if (!config.gmail.user || !config.gmail.appPassword) {
+      log('Gmail 配置缺失！请在 config.js 或环境变量中设置:', 'error');
+      log('  gmail.user: 你的 Gmail 地址', 'error');
+      log('  gmail.appPassword: Gmail 应用专用密码', 'error');
+      log('获取方式: https://myaccount.google.com/apppasswords', 'info');
+      process.exit(1);
+    }
+    count = parseInt(await askInput('请输入要注册的数量: '), 10);
+    if (isNaN(count) || count < 1) { log('数量无效', 'error'); process.exit(1); }
+
+    // 连接 Gmail
+    log('连接 Gmail...', 'wait');
+    gmailInbox = new GmailInbox(config.gmail.user, config.gmail.appPassword);
+    await gmailInbox.connect();
+  } else {
+    log('无效选项', 'error');
+    process.exit(1);
   }
 
-  // 启动浏览器
   log('启动浏览器...', 'wait');
   const browser = await puppeteer.launch({
     headless: config.headless,
@@ -397,7 +408,6 @@ async function main() {
     defaultViewport: null,
   });
 
-  // 反检测
   const pages = await browser.pages();
   if (pages.length > 0) {
     await pages[0].evaluateOnNewDocument(() => {
@@ -407,27 +417,19 @@ async function main() {
 
   const results = { success: [], failed: [] };
 
-  if (isAuto) {
-    // ---- 全自动模式：逐个注册 ----
-    // 注意：不并行，因为每个都需要等邮件
+  if (mode === '1') {
     for (let i = 0; i < count; i++) {
       log(`\n━━━ 进度: ${i + 1}/${count} ━━━`, 'info');
-
       const result = await registerAuto(browser, referralCode);
-      if (result.success) {
-        results.success.push(result);
-      } else {
-        results.failed.push(result);
-      }
+      if (result.success) results.success.push(result);
+      else results.failed.push(result);
 
-      // 间隔
       if (i < count - 1) {
         log(`等待 ${config.delay / 1000}s...`, 'wait');
         await delay(config.delay);
       }
     }
-  } else {
-    // ---- 手动模式：按批次 ----
+  } else if (mode === '2') {
     for (let i = 0; i < emails.length; i += config.maxConcurrentRequests) {
       const batch = emails.slice(i, i + config.maxConcurrentRequests);
       const batchNum = Math.floor(i / config.maxConcurrentRequests) + 1;
@@ -435,14 +437,10 @@ async function main() {
 
       log(`\n━━━ 批次 ${batchNum}/${totalBatches} ━━━`, 'info');
 
-      // 手动模式串行（每个都要等用户输入验证码）
       for (const email of batch) {
         const result = await registerManual(browser, email, referralCode);
-        if (result.success) {
-          results.success.push(result);
-        } else {
-          results.failed.push(result);
-        }
+        if (result.success) results.success.push(result);
+        else results.failed.push(result);
       }
 
       if (i + config.maxConcurrentRequests < emails.length) {
@@ -450,6 +448,21 @@ async function main() {
         await delay(config.delay);
       }
     }
+  } else if (mode === '3') {
+    for (let i = 0; i < count; i++) {
+      log(`\n━━━ 进度: ${i + 1}/${count} ━━━`, 'info');
+      const result = await registerGmail(browser, gmailInbox, referralCode);
+      if (result.success) results.success.push(result);
+      else results.failed.push(result);
+
+      if (i < count - 1) {
+        log(`等待 ${config.delay / 1000}s...`, 'wait');
+        await delay(config.delay);
+      }
+    }
+
+    // 断开 Gmail
+    await gmailInbox.disconnect().catch(() => {});
   }
 
   await browser.close();
@@ -465,10 +478,9 @@ async function main() {
 ╚══════════════════════════════════╝
   `);
 
-  // 保存结果
   const report = {
     timestamp: new Date().toISOString(),
-    mode: isAuto ? 'auto' : 'manual',
+    mode: mode === '1' ? 'auto' : mode === '2' ? 'manual' : 'gmail',
     total: count,
     success: results.success,
     failed: results.failed,
@@ -476,8 +488,7 @@ async function main() {
   fs.writeFileSync('register_results.json', JSON.stringify(report, null, 2));
   log('结果已保存到 register_results.json', 'success');
 
-  // 全自动模式额外保存账号信息
-  if (isAuto && results.success.length > 0) {
+  if ((mode === '1' || mode === '3') && results.success.length > 0) {
     const accounts = results.success.map(r => `${r.email}|${r.password}|${r.nickname}`).join('\n');
     fs.writeFileSync('accounts.txt', accounts + '\n');
     log('账号信息已保存到 accounts.txt (格式: 邮箱|密码|昵称)', 'success');

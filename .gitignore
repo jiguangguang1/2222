@@ -1,4 +1,6 @@
 node_modules/
+accounts.txt
 register_results.json
 error_*.png
-package-lock.json
+config.local.js
+.env

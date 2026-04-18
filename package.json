@@ -1,6 +1,6 @@
 {
   "name": "nol-auto-register",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "NOL World 批量注册账户工具",
   "main": "index.js",
   "scripts": {
@@ -9,6 +9,7 @@
   "dependencies": {
     "puppeteer": "^23.0.0",
     "axios": "^1.7.0",
-    "chalk": "^4.1.2"
+    "imapflow": "^1.0.162",
+    "mailparser": "^3.7.1"
   }
 }

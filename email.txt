@@ -1,5 +1,4 @@
-# 每行一个邮箱地址，# 开头的行为注释
-# 示例：
-# user1@gmail.com
-# user2@gmail.com
-# user3@gmail.com
+# 手动模式邮箱列表（每行一个）
+# 例如：
+# myemail1@gmail.com
+# myemail2@gmail.com
