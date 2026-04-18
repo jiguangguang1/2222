@@ -13,8 +13,9 @@ module.exports = {
   },
 
   // 可选覆盖项（不填则用默认值）
-  // delay: 5000,
-  // headless: false,
-  // defaultReferralCode: "",
-  // nicknamePrefix: "user",
+  // delay: 5000,              // 每个注册间隔（毫秒）
+  // maxRetries: 2,            // 失败重试次数
+  // headless: false,          // 后台运行浏览器
+  // defaultReferralCode: "",  // 邀请码
+  // nicknamePrefix: "user",   // 昵称前缀
 };

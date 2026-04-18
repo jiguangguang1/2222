@@ -6,6 +6,7 @@ const defaults = {
     appPassword: "",
   },
   delay: 5000,
+  maxRetries: 2,          // 每个注册失败后重试次数
   maxConcurrentRequests: 1,
   verificationTimeout: 300000,
   pageTimeout: 30000,
