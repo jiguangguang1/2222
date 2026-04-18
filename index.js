@@ -326,10 +326,13 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
 
     await inputVerificationCode(page, code);
 
-    const nickname = await completeRegistration(page, finalEmail);
+    // 等待页面跳转（登录成功）
+    await delay(2000);
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    await delay(2000);
 
-    log(`✅ 注册成功: ${finalEmail} (昵称: ${nickname})`, 'success');
-    return { success: true, email: finalEmail, nickname, password: config.password };
+    log(`✅ 登录成功: ${finalEmail}`, 'success');
+    return { success: true, email: finalEmail, url: page.url() };
 
   } catch (error) {
     log(`注册失败: ${finalEmail} - ${error.message}`, 'error');
