@@ -14,12 +14,20 @@ class GmailInbox {
     this.user = user;
     this.appPassword = appPassword.replace(/\s/g, ''); // 去除空格
     this.client = null;
+    this.connected = false;
+    this.lastError = null;
   }
 
   // ========================
   // 连接 Gmail IMAP
   // ========================
   async connect() {
+    // 先清理旧连接
+    await this.disconnect();
+
+    this.connected = false;
+    this.lastError = null;
+
     this.client = new ImapFlow({
       host: 'imap.gmail.com',
       port: 993,
@@ -29,9 +37,22 @@ class GmailInbox {
         pass: this.appPassword,
       },
       logger: false,
+      emitLogs: false,
+    });
+
+    // 关键：监听错误事件，防止 Node.js 未捕获错误崩溃
+    this.client.on('error', (err) => {
+      console.error(`\n⚠️ Gmail IMAP 连接错误: ${err.message}`);
+      this.connected = false;
+      this.lastError = err;
+    });
+
+    this.client.on('close', () => {
+      this.connected = false;
     });
 
     await this.client.connect();
+    this.connected = true;
     console.log(`📧 Gmail 已连接: ${this.user}`);
   }
 
@@ -40,8 +61,26 @@ class GmailInbox {
   // ========================
   async disconnect() {
     if (this.client) {
-      await this.client.logout().catch(() => {});
+      try {
+        // 移除监听器，避免断开时触发 error 事件
+        this.client.removeAllListeners('error');
+        this.client.removeAllListeners('close');
+        await this.client.logout();
+      } catch {
+        // 忽略断开错误
+      }
       this.client = null;
+      this.connected = false;
+    }
+  }
+
+  // ========================
+  // 检查连接是否健康，不健康则重连
+  // ========================
+  async ensureConnected() {
+    if (!this.connected || !this.client || this.lastError) {
+      console.log('\n🔄 Gmail 连接异常，正在重连...');
+      await this.connect();
     }
   }
 
@@ -82,7 +121,7 @@ class GmailInbox {
   // 等待验证码邮件，自动提取6位数字
   // ========================
   async waitForVerificationCode(timeout = 300000, interval = 5000) {
-    if (!this.client) await this.connect();
+    await this.ensureConnected();
 
     const startTime = Date.now();
     let seenUids = new Set();
@@ -92,6 +131,7 @@ class GmailInbox {
     // 先记录最新 100 封邮件的 UID 作为基准，避免拿到旧邮件
     // （扫描全量邮箱太慢，只看最近的就够了）
     try {
+      await this.ensureConnected();
       const lock = await this.client.getMailboxLock('INBOX');
       try {
         const status = await this.client.status('INBOX', { messages: true });
@@ -103,10 +143,14 @@ class GmailInbox {
       } finally {
         lock.release();
       }
-    } catch {}
+    } catch (err) {
+      console.error(`\n⚠️ 初始化扫描出错: ${err.message}`);
+      // 不阻塞，继续轮询
+    }
 
     while (Date.now() - startTime < timeout) {
       try {
+        await this.ensureConnected();
         const lock = await this.client.getMailboxLock('INBOX');
         try {
           // 搜索最近的未读邮件
@@ -126,7 +170,6 @@ class GmailInbox {
             const from = parsed.from?.text || '';
             const subject = parsed.subject || '';
 
-            // 记录发件人信息，便于调试
             const text = [
               parsed.text || '',
               parsed.html || '',
@@ -135,7 +178,6 @@ class GmailInbox {
 
             const code = this.extractCode(text);
             if (code) {
-              // 如果是 NOL 邮件，直接用；如果是其他邮件，只在没找到 NOL 邮件时用
               console.log(`\n✅ 从邮件 "${subject}" (from: ${from}) 提取到验证码: ${code}`);
               await this.client.messageFlagsAdd(String(uid), ['\\Seen']).catch(() => {});
               return code;
@@ -154,11 +196,8 @@ class GmailInbox {
         await this.sleep(interval);
       } catch (err) {
         console.error(`\n⚠️ Gmail 轮询出错: ${err.message}`);
-        // 尝试重连
-        try {
-          await this.disconnect();
-          await this.connect();
-        } catch {}
+        // 标记连接异常，下次循环会自动重连
+        this.connected = false;
         await this.sleep(interval);
       }
     }
