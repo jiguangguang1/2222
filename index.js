@@ -328,16 +328,29 @@ async function inputEmailAndSendCode(page, email) {
     throw new Error('找不到邮箱输入框');
   }
 
-  // 输入邮箱
-  await emailInput.focus();
+  // 输入邮箱 — 用 Puppeteer 原生键盘操作，让 React 正确响应
+  // 不能用 el.value = ''，会破坏 React 内部状态
+  await emailInput.click();           // 聚焦
   await delay(200);
-  await page.evaluate(el => { el.value = ''; }, emailInput);
-  await emailInput.type(email, { delay: 50 });
+  await page.keyboard.down('Control');
+  await page.keyboard.press('A');     // Ctrl+A 全选
+  await page.keyboard.up('Control');
+  await page.keyboard.press('Backspace'); // 删除已有内容
+  await delay(200);
+  await emailInput.type(email, { delay: 30 }); // 逐字符输入，触发 React onChange
   log(`已输入邮箱: ${email}`, 'info');
 
-  // 触发事件让页面验证邮箱
+  // 按 Tab 失焦，触发邮箱格式验证
+  await page.keyboard.press('Tab');
+  await delay(500);
+
+  // 额外触发 React 兼容的 InputEvent（某些 React 版本需要）
   await page.evaluate(el => {
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeInputValueSetter.call(el, el.value);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('blur', { bubbles: true }));
   }, emailInput);
@@ -400,13 +413,27 @@ async function inputEmailAndSendCode(page, email) {
     throw new Error('找不到"发送验证信至电子邮箱"按钮');
   }
 
-  // 点击按钮
+  // 点击按钮 — 用 page.click 模拟真实鼠标事件
   await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
   await delay(300);
 
   const urlBefore = page.url();
-  await sendBtn.click();
-  log('已点击发送验证码按钮', 'success');
+
+  // 获取按钮位置，用 page.click 发送真实鼠标事件
+  const btnBox = await sendBtn.boundingBox();
+  if (btnBox) {
+    await page.mouse.click(
+      btnBox.x + btnBox.width / 2,
+      btnBox.y + btnBox.height / 2,
+      { delay: 50 }
+    );
+    log('已通过鼠标点击发送验证码按钮', 'success');
+  } else {
+    // 兜底：移除 disabled 后用 evaluate 触发
+    await page.evaluate(el => { el.disabled = false; el.removeAttribute('disabled'); }, sendBtn);
+    await sendBtn.click();
+    log('已通过JS点击发送验证码按钮（兜底）', 'success');
+  }
 
   // 等待页面变化（SPA 可能不会触发 navigation 事件）
   await delay(3000);
