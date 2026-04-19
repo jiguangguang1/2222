@@ -241,14 +241,19 @@ async function agreeTerms(page) {
   // 策略3: 用 Puppeteer 坐标点击包含同意文字的元素
   if (result.clicked === 0 && !customCheckboxClicked) {
     log('JS 策略未生效，尝试坐标点击...', 'warn');
-    const agreementElements = await page.$x(
-      '//*[contains(text(), "已阅读") or contains(text(), "同意") or contains(text(), "用户协议")]'
-    );
-    for (const el of agreementElements) {
+
+    // 用 page.$$ 配合 XPath 查找
+    const agreeTexts = ['已阅读', '同意', '用户协议', '隐私政策'];
+    for (const text of agreeTexts) {
       try {
-        await robustClick(page, el);
-        log('坐标点击了同意元素', 'info');
-        await delay(300);
+        const elements = await page.$$(`xpath/.//*[contains(text(), "${text}")]`);
+        for (const el of elements) {
+          try {
+            await robustClick(page, el);
+            log(`坐标点击了包含"${text}"的元素`, 'info');
+            await delay(300);
+          } catch {}
+        }
       } catch {}
     }
 
@@ -692,20 +697,29 @@ async function clickNextButton(page) {
 
   for (const text of buttonTexts) {
     try {
-      const btns = await page.$x(`//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")]`);
-      for (const btn of btns) {
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          const rect = el.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' &&
-                 !el.disabled && rect.width > 0 && rect.height > 0;
-        }, btn).catch(() => false);
-
-        if (isVisible) {
-          await robustClick(page, btn);
-          log(`点击按钮: "${text}"`, 'info');
-          return true;
+      // 用 page.evaluate 代替 $x
+      const clicked = await page.evaluate((searchText) => {
+        const buttons = document.querySelectorAll('button, a, [role="button"]');
+        for (const btn of buttons) {
+          const btnText = (btn.textContent || '').toLowerCase();
+          if (btnText.includes(searchText.toLowerCase())) {
+            const style = window.getComputedStyle(btn);
+            const rect = btn.getBoundingClientRect();
+            if (style.display !== 'none' && style.visibility !== 'hidden' &&
+                !btn.disabled && rect.width > 0 && rect.height > 0) {
+              btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+              btn.click();
+              return btn.textContent.trim().substring(0, 30);
+            }
+          }
         }
+        return null;
+      }, text);
+
+      if (clicked) {
+        log(`点击按钮: "${clicked}"`, 'info');
+        await delay(500);
+        return true;
       }
     } catch {}
   }
@@ -766,10 +780,15 @@ async function completeRegistration(page, email, nickname) {
   });
 
   // 也尝试点击包含"同意"的 label
-  const agreeLabels = await page.$x('//label[contains(text(), "同意") or contains(text(), "agree")]');
-  for (const label of agreeLabels) {
-    try { await robustClick(page, label); } catch {}
-  }
+  await page.evaluate(() => {
+    const labels = document.querySelectorAll('label');
+    labels.forEach(label => {
+      const text = label.textContent || '';
+      if (text.includes('同意') || text.includes('agree') || text.includes('用户协议') || text.includes('隐私政策')) {
+        label.click();
+      }
+    });
+  });
 
   log('已勾选条款', 'info');
   await delay(500);
