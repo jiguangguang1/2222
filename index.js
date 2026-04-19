@@ -97,15 +97,25 @@ async function debugPageInfo(page) {
         id: i.id,
         name: i.name,
         placeholder: i.placeholder,
+        checked: i.checked,
       }));
-      return { url: location.href, title: document.title, buttons, inputs };
+      const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).map(c => ({
+        id: c.id,
+        name: c.name,
+        checked: c.checked,
+        label: c.closest('label')?.textContent?.trim()?.substring(0, 80) || '',
+        parentText: c.parentElement?.textContent?.trim()?.substring(0, 80) || '',
+      }));
+      return { url: location.href, title: document.title, buttons, inputs, checkboxes };
     });
     log(`页面: ${info.url}`, 'debug');
     log(`标题: ${info.title}`, 'debug');
     log(`按钮(${info.buttons.length}):`, 'debug');
     info.buttons.forEach((b, i) => log(`  [${i}] "${b.text}" type=${b.type} disabled=${b.disabled}`, 'debug'));
     log(`输入框(${info.inputs.length}):`, 'debug');
-    info.inputs.forEach((inp, i) => log(`  [${i}] type=${inp.type} id=${inp.id} name=${inp.name} placeholder=${inp.placeholder}`, 'debug'));
+    info.inputs.forEach((inp, i) => log(`  [${i}] type=${inp.type} id=${inp.id} name=${inp.name} placeholder=${inp.placeholder} checked=${inp.checked}`, 'debug'));
+    log(`复选框(${info.checkboxes.length}):`, 'debug');
+    info.checkboxes.forEach((c, i) => log(`  [${i}] id=${c.id} checked=${c.checked} label="${c.label}" parent="${c.parentText}"`, 'debug'));
   } catch (e) {
     log(`获取页面信息失败: ${e.message}`, 'debug');
   }
@@ -134,171 +144,154 @@ function clearProgress() {
 }
 
 // ========================
-// 点击按钮（增强版，多策略）
+// 增强点击：真实鼠标事件 + JS 触发双保险
 // ========================
-async function clickButton(page, buttonName = 'next') {
-  // 策略1: 按钮文字匹配
-  const buttonTexts = [
-    '发送验证码', '获取验证码', '发送', '获取',
-    'Send Code', 'Get Code', 'Send', 'Get',
-    '下一步', '确认', '提交', '完成', '注册', '注册完成',
-    '다음', '확인', '가입하기',
-    'Next', 'Submit', 'Confirm', 'Continue', 'Register',
-  ];
+async function robustClick(page, element) {
+  await element.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+  await delay(300);
 
-  for (const text of buttonTexts) {
-    try {
-      const btn = await page.$x(`//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")] | //a[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")]`);
-      if (btn.length > 0) {
-        // 检查是否可见且未禁用
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && !el.disabled;
-        }, btn[0]).catch(() => false);
-
-        if (isVisible) {
-          await btn[0].evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-          await delay(200);
-          await btn[0].click();
-          log(`点击按钮: "${text}"`, 'info');
-          return true;
-        }
-      }
-    } catch {}
+  const box = await element.boundingBox();
+  if (box) {
+    // 用真实鼠标坐标点击
+    await page.mouse.click(
+      box.x + box.width / 2,
+      box.y + box.height / 2,
+      { delay: 50 }
+    );
+    return true;
   }
-
-  // 策略2: CSS 选择器
-  const cssSelectors = [
-    'button:not([disabled])',
-    'a[class*="btn"]',
-    'div[class*="btn"]:not([disabled])',
-    'span[class*="btn"]',
-    '[role="button"]:not([disabled])',
-  ];
-
-  for (const sel of cssSelectors) {
-    try {
-      const elements = await page.$$(sel);
-      for (const el of elements) {
-        const isClickable = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          const rect = el.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' &&
-                 !el.disabled && rect.width > 0 && rect.height > 0;
-        }, el).catch(() => false);
-
-        if (isClickable) {
-          await el.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-          await delay(200);
-          await el.click();
-          log(`点击元素: ${sel}`, 'info');
-          return true;
-        }
-      }
-    } catch {}
-  }
-
-  // 策略3: submit 按钮
-  try {
-    const submitBtn = await page.$('button[type="submit"]:not([disabled])');
-    if (submitBtn) {
-      await submitBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await delay(300);
-      await submitBtn.click();
-      log('点击 submit 按钮', 'info');
-      return true;
-    }
-  } catch {}
-
-  return false;
+  // 兜底：JS 触发
+  await element.evaluate(el => {
+    el.disabled = false;
+    el.removeAttribute('disabled');
+    el.click();
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  return true;
 }
 
 // ========================
-// 公共注册流程（密码 + 条款 + 昵称）
+// 勾选同意条款复选框（关键修复）
 // ========================
+async function agreeTerms(page) {
+  log('查找并勾选同意条款复选框...', 'wait');
 
-async function completeRegistration(page, email, nickname) {
-  await delay(3000);
-  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-  await delay(1000);
+  // 先打印调试信息
+  await debugPageInfo(page);
 
-  // 设置密码
-  log('设置密码...', 'wait');
-  await delay(1000);
+  // 策略1: 直接勾选页面上所有未选中的 checkbox
+  const result = await page.evaluate(() => {
+    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+    let clicked = 0;
+    const details = [];
 
-  const passwordInputs = await page.$$('input[type="password"]');
-  if (passwordInputs.length >= 2) {
-    await passwordInputs[0].click({ clickCount: 3 });
-    await passwordInputs[0].type(config.password, { delay: 30 });
-    await passwordInputs[1].click({ clickCount: 3 });
-    await passwordInputs[1].type(config.password, { delay: 30 });
-    log('已输入密码（新密码 + 确认）', 'info');
-  } else if (passwordInputs.length === 1) {
-    await passwordInputs[0].click({ clickCount: 3 });
-    await passwordInputs[0].type(config.password, { delay: 30 });
-    log('已输入密码', 'info');
-  } else {
-    log('未找到密码输入框，跳过密码设置', 'warn');
-  }
+    checkboxes.forEach((cb, i) => {
+      const parentText = (cb.parentElement?.textContent || '').trim().substring(0, 100);
+      const label = cb.closest('label')?.textContent?.trim()?.substring(0, 100) || '';
+      details.push({ i, id: cb.id, name: cb.name, checked: cb.checked, parentText, label });
 
-  await delay(500);
-  await clickButton(page, 'next');
-  await delay(2000);
+      if (!cb.checked) {
+        // 触发 React 兼容的点击
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+        nativeSetter.call(cb, true);
+        cb.dispatchEvent(new Event('input', { bubbles: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        cb.click(); // 额外 click 确保
+        clicked++;
+      }
+    });
 
-  // 同意条款
-  log('同意条款...', 'wait');
+    // 也尝试点击 checkbox 相关的 label 或父元素
+    const labels = document.querySelectorAll('label');
+    labels.forEach(label => {
+      const text = label.textContent || '';
+      if (text.includes('同意') || text.includes('agree') || text.includes('用户协议') || text.includes('隐私政策') || text.includes('阅读')) {
+        label.click();
+        clicked++;
+      }
+    });
 
-  const allAgreeSelectors = [
-    'input[type="checkbox"]#all',
-    'input[type="checkbox"][data-testid*="all"]',
-    'input[type="checkbox"][id*="all"]',
-    'input[type="checkbox"][name*="all"]',
-  ];
+    // 尝试点击包含同意文字的可点击元素
+    const allElements = document.querySelectorAll('span, div, p, a');
+    allElements.forEach(el => {
+      const text = el.textContent || '';
+      if ((text.includes('已阅读并同意') || text.includes('本人已阅读')) && el.offsetParent !== null) {
+        el.click();
+        clicked++;
+      }
+    });
 
-  let clicked = false;
-  for (const sel of allAgreeSelectors) {
-    try {
-      const el = await page.$(sel);
-      if (el) { await el.click(); clicked = true; break; }
-    } catch {}
-  }
+    return { clicked, details, totalCheckboxes: checkboxes.length };
+  });
 
-  if (!clicked) {
-    const checkboxes = await page.$$('input[type="checkbox"]');
-    for (const cb of checkboxes) {
-      const checked = await page.evaluate(el => el.checked, cb).catch(() => false);
-      if (!checked) await cb.click().catch(() => {});
+  log(`复选框详情: ${JSON.stringify(result.details)}`, 'debug');
+  log(`已处理 ${result.clicked} 个复选框/标签`, 'info');
+
+  // 策略2: 用 Puppeteer 直接点击每个 checkbox 元素
+  if (result.clicked === 0 || result.totalCheckboxes === 0) {
+    log('JS 策略未生效，尝试 Puppeteer 直接点击...', 'warn');
+
+    // 点击包含"同意"或"阅读"文字的元素
+    const agreementElements = await page.$x(
+      '//*[contains(text(), "已阅读") or contains(text(), "同意") or contains(text(), "用户协议")]'
+    );
+    for (const el of agreementElements) {
+      try {
+        await robustClick(page, el);
+        log('点击了同意文字元素', 'info');
+        await delay(300);
+      } catch {}
+    }
+
+    // 最后兜底：点击所有 checkbox
+    const cbs = await page.$$('input[type="checkbox"]');
+    for (const cb of cbs) {
+      try {
+        const checked = await page.evaluate(el => el.checked, cb);
+        if (!checked) {
+          await robustClick(page, cb);
+          log(`点击了复选框`, 'info');
+          await delay(200);
+        }
+      } catch {}
     }
   }
-  log('已勾选条款', 'info');
 
-  await delay(500);
-  await clickButton(page, 'next');
-  await delay(2000);
+  await delay(1000);
 
-  // 设置昵称
-  nickname = nickname || generateNickname(config.nicknamePrefix);
-  log(`设置昵称: ${nickname}`, 'wait');
-
-  const nicknameInput = await page.$('input[type="text"]');
-  if (nicknameInput) {
-    await nicknameInput.click({ clickCount: 3 });
-    await nicknameInput.type(nickname, { delay: 30 });
-  }
-
-  await delay(500);
-  await clickButton(page, 'next');
-  await delay(3000);
-
-  return nickname;
+  // 验证是否勾选成功
+  const verifyResult = await page.evaluate(() => {
+    const cbs = document.querySelectorAll('input[type="checkbox"]');
+    return Array.from(cbs).map(c => ({ id: c.id, checked: c.checked }));
+  });
+  log(`勾选验证: ${JSON.stringify(verifyResult)}`, 'debug');
 }
 
 // ========================
-// 输入邮箱并发送验证码（核心修复）
+// 关闭可能弹出的下拉框/弹窗
 // ========================
+async function closeDropdowns(page) {
+  await page.evaluate(() => {
+    // 关闭语言选择等下拉框
+    document.querySelectorAll('[class*="dropdown"], [class*="select"], [class*="popover"], [class*="popup"]').forEach(el => {
+      if (el.classList.contains('open') || el.classList.contains('active') || el.classList.contains('show')) {
+        el.classList.remove('open', 'active', 'show');
+      }
+    });
+  });
+  // 点击页面空白处关闭下拉
+  await page.mouse.click(10, 10);
+  await delay(500);
+}
 
+// ========================
+// 输入邮箱并发送验证码（完整重写）
+// ========================
 async function inputEmailAndSendCode(page, email) {
   await delay(3000);
+
+  // 先关闭可能的下拉框
+  await closeDropdowns(page);
 
   // 查找邮箱输入框
   const emailSelectors = [
@@ -328,23 +321,22 @@ async function inputEmailAndSendCode(page, email) {
     throw new Error('找不到邮箱输入框');
   }
 
-  // 输入邮箱 — 用 Puppeteer 原生键盘操作，让 React 正确响应
-  // 不能用 el.value = ''，会破坏 React 内部状态
-  await emailInput.click();           // 聚焦
+  // 输入邮箱 — 键盘操作触发 React onChange
+  await emailInput.click();
   await delay(200);
   await page.keyboard.down('Control');
-  await page.keyboard.press('A');     // Ctrl+A 全选
+  await page.keyboard.press('A');
   await page.keyboard.up('Control');
-  await page.keyboard.press('Backspace'); // 删除已有内容
+  await page.keyboard.press('Backspace');
   await delay(200);
-  await emailInput.type(email, { delay: 30 }); // 逐字符输入，触发 React onChange
+  await emailInput.type(email, { delay: 30 });
   log(`已输入邮箱: ${email}`, 'info');
 
-  // 按 Tab 失焦，触发邮箱格式验证
+  // Tab 失焦触发验证
   await page.keyboard.press('Tab');
   await delay(500);
 
-  // 额外触发 React 兼容的 InputEvent（某些 React 版本需要）
+  // 额外触发 React 事件
   await page.evaluate(el => {
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
@@ -355,19 +347,28 @@ async function inputEmailAndSendCode(page, email) {
     el.dispatchEvent(new Event('blur', { bubbles: true }));
   }, emailInput);
 
-  log('等待按钮变为可用...', 'wait');
+  await delay(1000);
 
-  // 等待按钮出现并可用（通过文字精准匹配）
-  // 按钮: <button type="submit" ... disabled="">发送验证信至电子邮箱</button>
+  // ★★★ 关键修复：先勾选同意条款，再点发送 ★★★
+  await agreeTerms(page);
+  await delay(1000);
+
+  // 再次关闭可能的下拉
+  await closeDropdowns(page);
+  await delay(500);
+
+  log('等待发送按钮变为可用...', 'wait');
+
+  // 等待按钮出现并可用
   let sendBtn = null;
   for (let i = 0; i < 30; i++) {
     await delay(500);
 
-    // 通过 evaluate 在页面中精确查找包含 "发送验证信" 的按钮
     const btnHandle = await page.evaluateHandle(() => {
       const buttons = document.querySelectorAll('button');
       for (const btn of buttons) {
-        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码') || btn.textContent.includes('Send')) {
+        const text = btn.textContent || '';
+        if (text.includes('发送验证信') || text.includes('发送验证码') || text.includes('Send')) {
           return btn;
         }
       }
@@ -391,9 +392,9 @@ async function inputEmailAndSendCode(page, email) {
     }
   }
 
-  // 如果按钮仍然是 disabled，强制移除
+  // 如果按钮仍是 disabled，强制移除
   if (!sendBtn) {
-    log('按钮未自动变为可用，尝试强制点击...', 'warn');
+    log('按钮未自动变为可用，尝试强制启用...', 'warn');
     sendBtn = await page.evaluateHandle(() => {
       const buttons = document.querySelectorAll('button');
       for (const btn of buttons) {
@@ -410,16 +411,16 @@ async function inputEmailAndSendCode(page, email) {
   if (!sendBtn) {
     await debugScreenshot(page, 'no_send_btn');
     await debugPageInfo(page);
-    throw new Error('找不到"发送验证信至电子邮箱"按钮');
+    throw new Error('找不到发送验证码按钮');
   }
 
-  // 点击按钮 — 用 page.click 模拟真实鼠标事件
+  // 点击发送按钮
   await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
   await delay(300);
 
   const urlBefore = page.url();
 
-  // 获取按钮位置，用 page.click 发送真实鼠标事件
+  // 用真实鼠标点击
   const btnBox = await sendBtn.boundingBox();
   if (btnBox) {
     await page.mouse.click(
@@ -429,20 +430,23 @@ async function inputEmailAndSendCode(page, email) {
     );
     log('已通过鼠标点击发送验证码按钮', 'success');
   } else {
-    // 兜底：移除 disabled 后用 evaluate 触发
-    await page.evaluate(el => { el.disabled = false; el.removeAttribute('disabled'); }, sendBtn);
-    await sendBtn.click();
+    await page.evaluate(el => {
+      el.disabled = false;
+      el.removeAttribute('disabled');
+      el.click();
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    }, sendBtn);
     log('已通过JS点击发送验证码按钮（兜底）', 'success');
   }
 
-  // 等待页面变化（SPA 可能不会触发 navigation 事件）
+  // 等待页面响应
   await delay(3000);
 
   // 检测 URL 变化
   const urlAfter = page.url();
   if (urlBefore !== urlAfter) log(`URL变化: ${urlAfter}`, 'info');
 
-  // 等待验证码输入框出现（说明页面已切换到验证码步骤）
+  // 等待验证码输入框出现
   const codeSelectors = [
     'input[type="tel"]', 'input[type="number"]', 'input[inputmode="numeric"]',
     'input[maxlength="1"]', 'input[maxlength="6"]', 'input[maxlength="4"]',
@@ -465,15 +469,36 @@ async function inputEmailAndSendCode(page, email) {
     try {
       await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 });
       log('页面已跳转', 'info');
+      codeInputFound = true;
     } catch {}
   }
 
-  // 检查按钮是否还在（可能点击没生效）
+  // 检查按钮是否还在
   if (!codeInputFound) {
     const btnStill = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
     }).catch(() => false);
-    if (btnStill) log('警告: 发送按钮仍然存在，可能未生效', 'warn');
+    if (btnStill) {
+      log('⚠️ 发送按钮仍然存在，可能未生效。尝试再次点击...', 'warn');
+      await debugScreenshot(page, 'btn_still_exists');
+      await debugPageInfo(page);
+
+      // 再次尝试：用 evaluate 直接触发按钮的 onClick
+      await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
+            btn.disabled = false;
+            btn.removeAttribute('disabled');
+            // 触发所有可能的事件
+            ['mousedown', 'mouseup', 'click'].forEach(evtName => {
+              btn.dispatchEvent(new MouseEvent(evtName, { bubbles: true, cancelable: true }));
+            });
+          }
+        }
+      });
+      await delay(5000);
+    }
   }
 
   await debugScreenshot(page, 'after_send_code');
@@ -482,12 +507,9 @@ async function inputEmailAndSendCode(page, email) {
 // ========================
 // 输入验证码
 // ========================
-
 async function inputVerificationCode(page, code) {
-  // 等待验证码输入区域出现
   await delay(1000);
 
-  // 尝试多种输入框选择器
   const selectors = [
     'input[type="tel"]',
     'input[type="number"]',
@@ -513,7 +535,6 @@ async function inputVerificationCode(page, code) {
   }
 
   if (inputs.length >= 6) {
-    // 6个单独的输入框（每位一个）
     for (let i = 0; i < 6; i++) {
       await inputs[i].click();
       await delay(100);
@@ -521,30 +542,139 @@ async function inputVerificationCode(page, code) {
     }
     log('已输入验证码（6个独立框）', 'info');
   } else if (inputs.length >= 1) {
-    // 单个输入框，输入完整验证码
     await inputs[0].click({ clickCount: 3 });
     await delay(100);
     await inputs[0].type(code, { delay: 80 });
     log('已输入验证码（单框）', 'info');
   } else {
-    // 回退到键盘输入
     await page.keyboard.type(code, { delay: 80 });
     log('已通过键盘输入验证码', 'info');
   }
 
-  // 输入完成后按 Tab 或点击其他地方触发验证
   await page.keyboard.press('Tab');
   await delay(1000);
 
-  // 点击确认/下一步按钮
-  await clickButton(page, 'confirm');
+  // 点击确认/下一步
+  await clickNextButton(page);
   await delay(2000);
+}
+
+// ========================
+// 通用下一步按钮点击
+// ========================
+async function clickNextButton(page) {
+  const buttonTexts = [
+    '下一步', '确认', '提交', '完成', '注册', '注册完成', '继续',
+    'Next', 'Submit', 'Confirm', 'Continue', 'Register',
+    '다음', '확인', '가입하기',
+  ];
+
+  for (const text of buttonTexts) {
+    try {
+      const btns = await page.$x(`//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text.toLowerCase()}")]`);
+      for (const btn of btns) {
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' &&
+                 !el.disabled && rect.width > 0 && rect.height > 0;
+        }, btn).catch(() => false);
+
+        if (isVisible) {
+          await robustClick(page, btn);
+          log(`点击按钮: "${text}"`, 'info');
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  // CSS 兜底
+  const submitBtn = await page.$('button[type="submit"]:not([disabled])');
+  if (submitBtn) {
+    await robustClick(page, submitBtn);
+    log('点击 submit 按钮', 'info');
+    return true;
+  }
+
+  return false;
+}
+
+// ========================
+// 公共注册流程（密码 + 条款 + 昵称）
+// ========================
+async function completeRegistration(page, email, nickname) {
+  await delay(3000);
+  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+  await delay(1000);
+
+  // 设置密码
+  log('设置密码...', 'wait');
+  await delay(1000);
+
+  const passwordInputs = await page.$$('input[type="password"]');
+  if (passwordInputs.length >= 2) {
+    await passwordInputs[0].click({ clickCount: 3 });
+    await passwordInputs[0].type(config.password, { delay: 30 });
+    await passwordInputs[1].click({ clickCount: 3 });
+    await passwordInputs[1].type(config.password, { delay: 30 });
+    log('已输入密码（新密码 + 确认）', 'info');
+  } else if (passwordInputs.length === 1) {
+    await passwordInputs[0].click({ clickCount: 3 });
+    await passwordInputs[0].type(config.password, { delay: 30 });
+    log('已输入密码', 'info');
+  } else {
+    log('未找到密码输入框，跳过密码设置', 'warn');
+  }
+
+  await delay(500);
+  await clickNextButton(page);
+  await delay(2000);
+
+  // 同意条款（密码页面后的第二步）
+  log('同意条款...', 'wait');
+
+  // 再次勾选所有 checkbox
+  await page.evaluate(() => {
+    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      if (!cb.checked) {
+        cb.click();
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+  });
+
+  // 也尝试点击包含"同意"的 label
+  const agreeLabels = await page.$x('//label[contains(text(), "同意") or contains(text(), "agree")]');
+  for (const label of agreeLabels) {
+    try { await robustClick(page, label); } catch {}
+  }
+
+  log('已勾选条款', 'info');
+  await delay(500);
+  await clickNextButton(page);
+  await delay(2000);
+
+  // 设置昵称
+  nickname = nickname || generateNickname(config.nicknamePrefix);
+  log(`设置昵称: ${nickname}`, 'wait');
+
+  const nicknameInput = await page.$('input[type="text"]');
+  if (nicknameInput) {
+    await nicknameInput.click({ clickCount: 3 });
+    await nicknameInput.type(nickname, { delay: 30 });
+  }
+
+  await delay(500);
+  await clickNextButton(page);
+  await delay(3000);
+
+  return nickname;
 }
 
 // ========================
 // 核心注册函数
 // ========================
-
 async function doRegister(browser, mode, email, referralCode, gmailInbox) {
   const page = await browser.newPage();
   await page.setUserAgent(randomUA());
@@ -581,12 +711,11 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
 
     log('打开注册页面...', 'wait');
     await page.goto(url, { waitUntil: 'networkidle2', timeout: config.pageTimeout });
-    await delay(3000); // 额外等 SPA 渲染
+    await delay(3000);
 
-    // 截图确认页面加载
     await debugScreenshot(page, 'page_loaded');
 
-    // 步骤1: 输入邮箱 + 发送验证码
+    // 步骤1: 输入邮箱 + 勾选条款 + 发送验证码
     await inputEmailAndSendCode(page, finalEmail);
 
     // 步骤2: 获取验证码
@@ -631,7 +760,6 @@ async function doRegister(browser, mode, email, referralCode, gmailInbox) {
 // ========================
 // 带重试的注册包装
 // ========================
-
 async function registerWithRetry(browser, mode, email, referralCode, gmailInbox) {
   const maxRetries = config.maxRetries || 1;
 
@@ -655,12 +783,11 @@ async function registerWithRetry(browser, mode, email, referralCode, gmailInbox)
 // ========================
 // 主流程
 // ========================
-
 async function main() {
   console.log(`
 ╔══════════════════════════════════════╗
 ║     NOL World 账户批量注册工具       ║
-║     v1.3 — 修复按钮点击 + 调试截图   ║
+║     v1.4 — 修复同意条款+发送按钮    ║
 ╚══════════════════════════════════════╝
   `);
 
@@ -726,7 +853,6 @@ async function main() {
     } catch (err) {
       log(`Gmail 连接失败: ${err.message}`, 'error');
       log('可能原因: 1) 网络/VPN问题 2) IMAP未开启 3) 应用密码错误', 'error');
-      log('请检查: https://mail.google.com/mail/u/0/#settings/fwdandpop 确保IMAP已启用', 'info');
       process.exit(1);
     }
   }
@@ -745,11 +871,15 @@ async function main() {
     headless: config.headless,
     executablePath: (function() {
       const paths = [
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        // Chrome 优先（Edge 跟踪防护会导致 401）
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
         '/usr/bin/google-chrome',
         '/usr/bin/chromium-browser',
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        // Edge 备选
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
       ];
       for (const p of paths) { try { if (fs.existsSync(p)) return p; } catch {} }
       return undefined;
