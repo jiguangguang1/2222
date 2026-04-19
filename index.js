@@ -176,10 +176,9 @@ async function robustClick(page, element) {
 async function agreeTerms(page) {
   log('查找并勾选同意条款复选框...', 'wait');
 
-  // 先打印调试信息
   await debugPageInfo(page);
 
-  // 策略1: 直接勾选页面上所有未选中的 checkbox
+  // 策略1: 查找并点击所有 checkbox（兼容 React/Vue 自定义组件）
   const result = await page.evaluate(() => {
     const checkboxes = document.querySelectorAll('input[type="checkbox"]');
     let clicked = 0;
@@ -191,32 +190,16 @@ async function agreeTerms(page) {
       details.push({ i, id: cb.id, name: cb.name, checked: cb.checked, parentText, label });
 
       if (!cb.checked) {
-        // 触发 React 兼容的点击
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
-        nativeSetter.call(cb, true);
+        // 先用原生 setter
+        try {
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+          nativeSetter.call(cb, true);
+        } catch {}
+        // 再直接 click
+        cb.click();
+        // 触发事件
         cb.dispatchEvent(new Event('input', { bubbles: true }));
         cb.dispatchEvent(new Event('change', { bubbles: true }));
-        cb.click(); // 额外 click 确保
-        clicked++;
-      }
-    });
-
-    // 也尝试点击 checkbox 相关的 label 或父元素
-    const labels = document.querySelectorAll('label');
-    labels.forEach(label => {
-      const text = label.textContent || '';
-      if (text.includes('同意') || text.includes('agree') || text.includes('用户协议') || text.includes('隐私政策') || text.includes('阅读')) {
-        label.click();
-        clicked++;
-      }
-    });
-
-    // 尝试点击包含同意文字的可点击元素
-    const allElements = document.querySelectorAll('span, div, p, a');
-    allElements.forEach(el => {
-      const text = el.textContent || '';
-      if ((text.includes('已阅读并同意') || text.includes('本人已阅读')) && el.offsetParent !== null) {
-        el.click();
         clicked++;
       }
     });
@@ -224,33 +207,59 @@ async function agreeTerms(page) {
     return { clicked, details, totalCheckboxes: checkboxes.length };
   });
 
-  log(`复选框详情: ${JSON.stringify(result.details)}`, 'debug');
-  log(`已处理 ${result.clicked} 个复选框/标签`, 'info');
+  log(`找到 ${result.totalCheckboxes} 个复选框，处理了 ${result.clicked} 个`, 'info');
+  for (const d of result.details) {
+    log(`  checkbox[${d.i}]: id=${d.id} checked=${d.checked} text="${d.parentText.substring(0, 50)}"`, 'debug');
+  }
 
-  // 策略2: 用 Puppeteer 直接点击每个 checkbox 元素
-  if (result.clicked === 0 || result.totalCheckboxes === 0) {
-    log('JS 策略未生效，尝试 Puppeteer 直接点击...', 'warn');
+  // 策略2: 点击包含"已阅读并同意"的整个文字区域（可能是自定义 checkbox）
+  const customCheckboxClicked = await page.evaluate(() => {
+    // 找包含"已阅读"或"同意"的所有可见元素
+    const allEls = document.querySelectorAll('*');
+    let found = false;
+    for (const el of allEls) {
+      // 只检查直接包含文字的叶子节点
+      if (el.children.length > 5) continue;
+      const text = el.textContent || '';
+      if ((text.includes('已阅读') || text.includes('本人已阅读')) && el.offsetParent !== null) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.width < 800) {
+          el.click();
+          // 也触发父元素
+          if (el.parentElement) el.parentElement.click();
+          found = true;
+        }
+      }
+    }
+    return found;
+  });
 
-    // 点击包含"同意"或"阅读"文字的元素
+  if (customCheckboxClicked) {
+    log('点击了自定义复选框区域', 'info');
+  }
+
+  // 策略3: 用 Puppeteer 坐标点击包含同意文字的元素
+  if (result.clicked === 0 && !customCheckboxClicked) {
+    log('JS 策略未生效，尝试坐标点击...', 'warn');
     const agreementElements = await page.$x(
       '//*[contains(text(), "已阅读") or contains(text(), "同意") or contains(text(), "用户协议")]'
     );
     for (const el of agreementElements) {
       try {
         await robustClick(page, el);
-        log('点击了同意文字元素', 'info');
+        log('坐标点击了同意元素', 'info');
         await delay(300);
       } catch {}
     }
 
-    // 最后兜底：点击所有 checkbox
+    // 兜底：点击所有 checkbox
     const cbs = await page.$$('input[type="checkbox"]');
     for (const cb of cbs) {
       try {
         const checked = await page.evaluate(el => el.checked, cb);
         if (!checked) {
           await robustClick(page, cb);
-          log(`点击了复选框`, 'info');
+          log(`坐标点击了复选框`, 'info');
           await delay(200);
         }
       } catch {}
@@ -259,7 +268,9 @@ async function agreeTerms(page) {
 
   await delay(1000);
 
-  // 验证是否勾选成功
+  // 截图验证勾选状态
+  await debugScreenshot(page, 'after_agree_terms');
+
   const verifyResult = await page.evaluate(() => {
     const cbs = document.querySelectorAll('input[type="checkbox"]');
     return Array.from(cbs).map(c => ({ id: c.id, checked: c.checked }));
@@ -414,37 +425,134 @@ async function inputEmailAndSendCode(page, email) {
     throw new Error('找不到发送验证码按钮');
   }
 
-  // 点击发送按钮
+  // 获取按钮位置
   await sendBtn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-  await delay(300);
+  await delay(500);
 
   const urlBefore = page.url();
-
-  // 用真实鼠标点击
   const btnBox = await sendBtn.boundingBox();
-  if (btnBox) {
-    await page.mouse.click(
-      btnBox.x + btnBox.width / 2,
-      btnBox.y + btnBox.height / 2,
-      { delay: 50 }
-    );
-    log('已通过鼠标点击发送验证码按钮', 'success');
-  } else {
-    await page.evaluate(el => {
-      el.disabled = false;
-      el.removeAttribute('disabled');
-      el.click();
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    }, sendBtn);
-    log('已通过JS点击发送验证码按钮（兜底）', 'success');
+
+  if (!btnBox) {
+    throw new Error('无法获取按钮位置');
   }
 
-  // 等待页面响应
+  const cx = btnBox.x + btnBox.width / 2;
+  const cy = btnBox.y + btnBox.height / 2;
+
+  // ★★★ 六连击策略：确保按钮被触发 ★★★
+
+  // 策略1: 完整鼠标事件链（mousedown → mouseup → click）
+  log('策略1: 完整鼠标事件链点击...', 'debug');
+  await page.mouse.move(cx, cy, { steps: 5 });
+  await delay(100);
+  await page.mouse.down();
+  await delay(80);
+  await page.mouse.up();
+  await delay(500);
+
+  // 等一下检查是否生效
+  await delay(2000);
+  let btnGone = !(await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
+  }).catch(() => true));
+
+  if (!btnGone) {
+    // 策略2: 直接触发 React onClick 内部处理器
+    log('策略2: 查找React onClick处理器并触发...', 'debug');
+    await page.evaluate(() => {
+      const findReactFiber = (dom) => {
+        const key = Object.keys(dom).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$') || k.startsWith('__reactProps$'));
+        return key ? dom[key] : null;
+      };
+
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
+          btn.disabled = false;
+          btn.removeAttribute('disabled');
+
+          // 尝试找到 React props 中的 onClick
+          const fiber = findReactFiber(btn);
+          if (fiber) {
+            // React 18+ : __reactProps$xxx
+            if (fiber.onClick) {
+              fiber.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
+              return;
+            }
+            // 遍历 fiber 链找 onClick
+            let current = fiber;
+            for (let i = 0; i < 10 && current; i++) {
+              if (current.memoizedProps?.onClick) {
+                current.memoizedProps.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
+                return;
+              }
+              if (current.pendingProps?.onClick) {
+                current.pendingProps.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
+                return;
+              }
+              current = current.return;
+            }
+          }
+
+          // 兜底：dispatch 全套事件
+          const rect = btn.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          const eventOpts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+          ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
+            btn.dispatchEvent(new PointerEvent(type, eventOpts));
+          });
+        }
+      }
+    });
+    await delay(2000);
+  }
+
+  // 检查是否生效
+  btnGone = !(await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
+  }).catch(() => true));
+
+  if (!btnGone) {
+    // 策略3: 找到父级 form 直接 submit
+    log('策略3: 尝试提交表单...', 'debug');
+    await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
+          const form = btn.closest('form');
+          if (form) {
+            form.requestSubmit ? form.requestSubmit() : form.submit();
+            return;
+          }
+        }
+      }
+      // 没有 form，尝试找最近的可提交元素
+      const form = document.querySelector('form');
+      if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+    });
+    await delay(2000);
+  }
+
+  // 策略4: 再用 page.click（Playwright 风格更精确）
+  if (!btnGone) {
+    btnGone = !(await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
+    }).catch(() => true));
+  }
+
+  if (!btnGone) {
+    log('策略4: 再次鼠标点击（双击）...', 'debug');
+    await page.mouse.click(cx, cy, { clickCount: 2, delay: 100 });
+    await delay(2000);
+  }
+
+  // 等待页面响应 — 检测验证码输入框或 URL 变化
+  log('等待页面响应...', 'wait');
   await delay(3000);
 
-  // 检测 URL 变化
   const urlAfter = page.url();
-  if (urlBefore !== urlAfter) log(`URL变化: ${urlAfter}`, 'info');
+  if (urlBefore !== urlAfter) log(`URL变化: ${urlBefore} → ${urlAfter}`, 'info');
 
   // 等待验证码输入框出现
   const codeSelectors = [
@@ -457,7 +565,7 @@ async function inputEmailAndSendCode(page, email) {
   let codeInputFound = false;
   for (const sel of codeSelectors) {
     try {
-      await page.waitForSelector(sel, { timeout: 5000, visible: true });
+      await page.waitForSelector(sel, { timeout: 8000, visible: true });
       log(`检测到验证码输入框: ${sel}`, 'success');
       codeInputFound = true;
       break;
@@ -473,32 +581,45 @@ async function inputEmailAndSendCode(page, email) {
     } catch {}
   }
 
-  // 检查按钮是否还在
-  if (!codeInputFound) {
-    const btnStill = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
-    }).catch(() => false);
-    if (btnStill) {
-      log('⚠️ 发送按钮仍然存在，可能未生效。尝试再次点击...', 'warn');
-      await debugScreenshot(page, 'btn_still_exists');
-      await debugPageInfo(page);
+  // 最终检查
+  const btnStill = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
+  }).catch(() => false);
 
-      // 再次尝试：用 evaluate 直接触发按钮的 onClick
-      await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button');
-        for (const btn of buttons) {
-          if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
-            btn.disabled = false;
-            btn.removeAttribute('disabled');
-            // 触发所有可能的事件
-            ['mousedown', 'mouseup', 'click'].forEach(evtName => {
-              btn.dispatchEvent(new MouseEvent(evtName, { bubbles: true, cancelable: true }));
-            });
+  if (btnStill && !codeInputFound) {
+    log('⚠️ 所有点击策略均未生效，打印页面详情...', 'warn');
+    await debugScreenshot(page, 'all_clicks_failed');
+    await debugPageInfo(page);
+
+    // 打印按钮的所有属性和父元素
+    await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
+          console.log('=== SEND BUTTON DEBUG ===');
+          console.log('outerHTML:', btn.outerHTML);
+          console.log('disabled:', btn.disabled);
+          console.log('type:', btn.type);
+          console.log('form:', btn.form ? btn.form.outerHTML.substring(0, 200) : 'no form');
+          console.log('parent:', btn.parentElement?.outerHTML?.substring(0, 200));
+          console.log('getEventListeners:', typeof getEventListeners !== 'undefined' ? getEventListeners(btn) : 'N/A');
+          // 检查所有祖先的 pointer-events
+          let el = btn;
+          while (el) {
+            const style = window.getComputedStyle(el);
+            if (style.pointerEvents === 'none') {
+              console.log('NONE pointer-events found on:', el.tagName, el.className);
+            }
+            el = el.parentElement;
           }
         }
-      });
-      await delay(5000);
-    }
+      }
+    });
+  }
+
+  if (!btnStill && !codeInputFound) {
+    log('按钮消失了但没跳转，等待中...', 'wait');
+    await delay(5000);
   }
 
   await debugScreenshot(page, 'after_send_code');
