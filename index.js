@@ -444,118 +444,44 @@ async function inputEmailAndSendCode(page, email) {
   const cx = btnBox.x + btnBox.width / 2;
   const cy = btnBox.y + btnBox.height / 2;
 
-  // ★★★ 六连击策略：确保按钮被触发 ★★★
+  // ★★★ 真人模拟点击 ★★★
 
-  // 策略1: 完整鼠标事件链（mousedown → mouseup → click）
-  log('策略1: 完整鼠标事件链点击...', 'debug');
-  await page.mouse.move(cx, cy, { steps: 5 });
-  await delay(100);
+  // 1. 先把鼠标移到页面随机位置（模拟浏览）
+  await page.mouse.move(300 + Math.random() * 400, 200 + Math.random() * 200, { steps: 10 });
+  await delay(300 + Math.random() * 500);
+
+  // 2. 模拟自然移动到按钮（不是直线，带抖动）
+  const steps = 15 + Math.floor(Math.random() * 10);
+  const startX = 200 + Math.random() * 300;
+  const startY = 100 + Math.random() * 200;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    // 贝塞尔曲线 + 随机抖动
+    const jitter = (1 - Math.abs(t - 0.5) * 2) * 3;
+    const x = startX + (cx - startX) * t + (Math.random() - 0.5) * jitter;
+    const y = startY + (cy - startY) * t + (Math.random() - 0.5) * jitter;
+    await page.mouse.move(x, y, { steps: 1 });
+    await delay(20 + Math.random() * 30);
+  }
+  // 最终精确移到按钮中心
+  await page.mouse.move(cx, cy, { steps: 3 });
+  await delay(200 + Math.random() * 300);
+
+  // 3. Hover 一下（触发 CSS :hover 状态）
+  await delay(150 + Math.random() * 200);
+
+  // 4. 正常点击（mousedown → 短暂延迟 → mouseup）
   await page.mouse.down();
-  await delay(80);
+  await delay(60 + Math.random() * 80); // 真人按住约 60-140ms
   await page.mouse.up();
-  await delay(500);
+  await delay(100);
 
-  // 等一下检查是否生效
-  await delay(2000);
-  let btnGone = !(await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
-  }).catch(() => true));
+  log('已模拟真人点击发送按钮', 'success');
 
-  if (!btnGone) {
-    // 策略2: 直接触发 React onClick 内部处理器
-    log('策略2: 查找React onClick处理器并触发...', 'debug');
-    await page.evaluate(() => {
-      const findReactFiber = (dom) => {
-        const key = Object.keys(dom).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$') || k.startsWith('__reactProps$'));
-        return key ? dom[key] : null;
-      };
-
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
-        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
-          btn.disabled = false;
-          btn.removeAttribute('disabled');
-
-          // 尝试找到 React props 中的 onClick
-          const fiber = findReactFiber(btn);
-          if (fiber) {
-            // React 18+ : __reactProps$xxx
-            if (fiber.onClick) {
-              fiber.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
-              return;
-            }
-            // 遍历 fiber 链找 onClick
-            let current = fiber;
-            for (let i = 0; i < 10 && current; i++) {
-              if (current.memoizedProps?.onClick) {
-                current.memoizedProps.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
-                return;
-              }
-              if (current.pendingProps?.onClick) {
-                current.pendingProps.onClick({ preventDefault: () => {}, stopPropagation: () => {} });
-                return;
-              }
-              current = current.return;
-            }
-          }
-
-          // 兜底：dispatch 全套事件
-          const rect = btn.getBoundingClientRect();
-          const x = rect.left + rect.width / 2;
-          const y = rect.top + rect.height / 2;
-          const eventOpts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
-          ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
-            btn.dispatchEvent(new PointerEvent(type, eventOpts));
-          });
-        }
-      }
-    });
-    await delay(2000);
-  }
-
-  // 检查是否生效
-  btnGone = !(await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
-  }).catch(() => true));
-
-  if (!btnGone) {
-    // 策略3: 找到父级 form 直接 submit
-    log('策略3: 尝试提交表单...', 'debug');
-    await page.evaluate(() => {
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
-        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
-          const form = btn.closest('form');
-          if (form) {
-            form.requestSubmit ? form.requestSubmit() : form.submit();
-            return;
-          }
-        }
-      }
-      // 没有 form，尝试找最近的可提交元素
-      const form = document.querySelector('form');
-      if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
-    });
-    await delay(2000);
-  }
-
-  // 策略4: 再用 page.click（Playwright 风格更精确）
-  if (!btnGone) {
-    btnGone = !(await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
-    }).catch(() => true));
-  }
-
-  if (!btnGone) {
-    log('策略4: 再次鼠标点击（双击）...', 'debug');
-    await page.mouse.click(cx, cy, { clickCount: 2, delay: 100 });
-    await delay(2000);
-  }
-
-  // 等待页面响应 — 检测验证码输入框或 URL 变化
-  log('等待页面响应...', 'wait');
+  // 等待页面响应
   await delay(3000);
 
+  // 检测 URL 变化
   const urlAfter = page.url();
   if (urlBefore !== urlAfter) log(`URL变化: ${urlBefore} → ${urlAfter}`, 'info');
 
@@ -586,44 +512,24 @@ async function inputEmailAndSendCode(page, email) {
     } catch {}
   }
 
-  // 最终检查
+  // 检查按钮是否还在
   const btnStill = await page.evaluate(() => {
     return Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('发送验证信'));
   }).catch(() => false);
 
   if (btnStill && !codeInputFound) {
-    log('⚠️ 所有点击策略均未生效，打印页面详情...', 'warn');
-    await debugScreenshot(page, 'all_clicks_failed');
-    await debugPageInfo(page);
+    log('⚠️ 首次点击未生效，等待1秒后重试...', 'warn');
+    await delay(1000);
 
-    // 打印按钮的所有属性和父元素
-    await page.evaluate(() => {
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
-        if (btn.textContent.includes('发送验证信') || btn.textContent.includes('发送验证码')) {
-          console.log('=== SEND BUTTON DEBUG ===');
-          console.log('outerHTML:', btn.outerHTML);
-          console.log('disabled:', btn.disabled);
-          console.log('type:', btn.type);
-          console.log('form:', btn.form ? btn.form.outerHTML.substring(0, 200) : 'no form');
-          console.log('parent:', btn.parentElement?.outerHTML?.substring(0, 200));
-          console.log('getEventListeners:', typeof getEventListeners !== 'undefined' ? getEventListeners(btn) : 'N/A');
-          // 检查所有祖先的 pointer-events
-          let el = btn;
-          while (el) {
-            const style = window.getComputedStyle(el);
-            if (style.pointerEvents === 'none') {
-              console.log('NONE pointer-events found on:', el.tagName, el.className);
-            }
-            el = el.parentElement;
-          }
-        }
-      }
-    });
-  }
-
-  if (!btnStill && !codeInputFound) {
-    log('按钮消失了但没跳转，等待中...', 'wait');
+    // 再次 hover → click
+    await page.mouse.move(cx - 20, cy - 10, { steps: 5 });
+    await delay(200);
+    await page.mouse.move(cx, cy, { steps: 3 });
+    await delay(300);
+    await page.mouse.down();
+    await delay(80);
+    await page.mouse.up();
+    log('二次点击完成', 'info');
     await delay(5000);
   }
 
@@ -817,15 +723,85 @@ async function completeRegistration(page, email, nickname) {
 // ========================
 async function doRegister(browser, mode, email, referralCode, gmailInbox) {
   const page = await browser.newPage();
-  await page.setUserAgent(randomUA());
-  await page.setViewport({ width: 1280, height: 800 });
 
-  // 反检测
+  // 反检测 — 全面注入
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-    window.chrome = { runtime: {} };
+    // webdriver
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    delete navigator.__proto__.webdriver;
+
+    // chrome 对象
+    window.chrome = {
+      runtime: {
+        onMessage: { addListener: () => {}, removeListener: () => {} },
+        sendMessage: () => {},
+      },
+      loadTimes: () => ({}),
+      csi: () => ({}),
+      app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+    };
+
+    // plugins
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const arr = [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+        ];
+        arr.item = (i) => arr[i];
+        arr.namedItem = (name) => arr.find(p => p.name === name);
+        arr.refresh = () => {};
+        return arr;
+      },
+    });
+
+    // languages
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'] });
+    Object.defineProperty(navigator, 'language', { get: () => 'zh-CN' });
+
+    // permissions
+    const originalQuery = window.navigator.permissions?.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    }
+
+    // WebGL vendor/renderer
+    const getParameterProxyHandler = {
+      apply: function(target, thisArg, args) {
+        const param = args[0];
+        if (param === 37445) return 'Intel Inc.';
+        if (param === 37446) return 'Intel Iris OpenGL Engine';
+        return target.apply(thisArg, args);
+      }
+    };
+    const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = new Proxy(origGetParameter, getParameterProxyHandler);
+
+    // iframe contentWindow
+    const origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+      get: function() {
+        const result = origContentWindow.get.call(this);
+        if (result) {
+          try { Object.defineProperty(result, 'navigator', { get: () => navigator }); } catch {}
+        }
+        return result;
+      }
+    });
+  });
+
+  // 设置真实 UA（不是 Puppeteer 默认的）
+  await page.setUserAgent(randomUA());
+  await page.setViewport({ width: 1366, height: 768 }); // 更常见的分辨率
+
+  // HTTP 头设置
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   });
 
   let tempMail = null;
